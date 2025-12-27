@@ -5,7 +5,6 @@ The frontend is styled with Tailwind CSS and shadcn-ui components.
 
 ## Features
 - Natural language to SQL conversion
-- JWT authentication
 - MySQL database integration
 - Clean UI with shadcn + Tailwind
 
