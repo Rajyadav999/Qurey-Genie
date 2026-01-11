@@ -3,9 +3,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
-import { Database, Loader2, CheckCircle, AlertCircle, Lightbulb, XCircle, WifiOff, Lock, Server } from 'lucide-react';
+import { Database, Loader2, CheckCircle, AlertCircle, Lightbulb, XCircle, WifiOff, Lock, Server, ChevronRight, ChevronLeft } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 const API_BASE = "http://localhost:8000";
 
@@ -15,12 +16,11 @@ interface DatabaseConnectionModalProps {
   onConnect: (data: any) => void;
 }
 
-interface ConnectionFormData {
+interface DBCredentials {
   host: string;
   port: string;
   user: string;
   password: string;
-  database: string;
 }
 
 interface ConnectionError {
@@ -31,39 +31,50 @@ interface ConnectionError {
   code: string;
 }
 
+type ConnectionStep = 'credentials' | 'database-selection';
+
 export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: DatabaseConnectionModalProps) => {
-  const [formData, setFormData] = useState<ConnectionFormData>({
+  // Step management
+  const [currentStep, setCurrentStep] = useState<ConnectionStep>('credentials');
+  
+  // Credentials state
+  const [credentials, setCredentials] = useState<DBCredentials>({
     host: '127.0.0.1',
     port: '3306',
     user: 'root',
     password: '',
-    database: '',
   });
-  
+
+  // Database selection state
+  const [availableDatabases, setAvailableDatabases] = useState<string[]>([]);
+  const [selectedDatabase, setSelectedDatabase] = useState<string>('');
+
+  // UI state
+  const [isLoadingDatabases, setIsLoadingDatabases] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<ConnectionError | null>(null);
+  
   const { toast } = useToast();
 
-  const handleInputChange = (field: keyof ConnectionFormData, value: string) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
-    // Clear error when user starts typing
+  const handleCredentialsChange = (field: keyof DBCredentials, value: string) => {
+    setCredentials(prev => ({ ...prev, [field]: value }));
     if (connectionError) {
       setConnectionError(null);
     }
   };
 
-  const handleConnect = async () => {
-    // Validate required fields
-    if (!formData.host.trim()) {
+  const handleListDatabases = async () => {
+    // Validate credentials
+    if (!credentials.host.trim()) {
       toast({
         variant: "destructive",
         title: "Host Required",
-        description: "Please enter the database host (e.g., localhost or 127.0.0.1)",
+        description: "Please enter the database host",
       });
       return;
     }
 
-    if (!formData.user.trim()) {
+    if (!credentials.user.trim()) {
       toast({
         variant: "destructive",
         title: "Username Required",
@@ -72,17 +83,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
       return;
     }
 
-    if (!formData.database.trim()) {
-      toast({
-        variant: "destructive",
-        title: "Database Name Required",
-        description: "Please enter the name of the database you want to connect to",
-      });
-      return;
-    }
-
-    // Validate port is a number
-    const portNum = parseInt(formData.port, 10);
+    const portNum = parseInt(credentials.port, 10);
     if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
       toast({
         variant: "destructive",
@@ -92,66 +93,67 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
       return;
     }
 
-    setIsConnecting(true);
     setConnectionError(null);
-
-    const payload = {
-      host: formData.host.trim(),
-      port: portNum,
-      user: formData.user.trim(),
-      password: formData.password,
-      database: formData.database.trim(),
-    };
+    setIsLoadingDatabases(true);
 
     try {
-      const response = await fetch(`${API_BASE}/api/connect`, {
+      const response = await fetch(`${API_BASE}/api/list-databases`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          host: credentials.host.trim(),
+          port: portNum,
+          user: credentials.user.trim(),
+          password: credentials.password
+        })
       });
-      
-      const result = await response.json();
 
-      if (response.ok && result.success) {
-        toast({
-          title: "✅ Connection Successful!",
-          description: `Connected to ${formData.database} database successfully.`,
-          duration: 5000,
-        });
-        
-        onConnect({
-          type: 'mysql',
-          ...formData
-        });
-        
-        setConnectionError(null);
-        onClose();
-      } else {
-        // Handle structured error response from backend
-        if (result.detail && typeof result.detail === 'object') {
-          setConnectionError(result.detail);
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (data.detail && typeof data.detail === 'object') {
+          setConnectionError(data.detail);
           
-          // Show toast for critical errors
-          if (result.detail.code === 'AUTH_FAILED') {
+          if (data.detail.code === 'AUTH_FAILED') {
             toast({
               variant: "destructive",
               title: "Authentication Failed",
               description: "Please check your username and password",
             });
+          } else if (data.detail.code === 'CONNECTION_REFUSED') {
+            toast({
+              variant: "destructive",
+              title: "Connection Refused",
+              description: "Cannot connect to MySQL server",
+            });
           }
         } else {
-          // Fallback for unstructured errors
           setConnectionError({
             error: "Connection Error",
-            message: result.detail || result.message || 'An unknown error occurred.',
+            message: data.message || 'Failed to connect to MySQL server.',
             code: "UNKNOWN_ERROR"
           });
         }
+        return;
+      }
+
+      if (data.success && data.databases && data.databases.length > 0) {
+        setAvailableDatabases(data.databases);
+        setCurrentStep('database-selection');
+        toast({
+          title: "✅ Server Connected",
+          description: `Found ${data.databases.length} database(s)`,
+        });
+      } else {
+        setConnectionError({
+          error: "No Databases Found",
+          message: "No user databases found on this server.",
+          suggestion: "CREATE DATABASE my_database;",
+          code: "NO_DATABASES"
+        });
       }
     } catch (error: any) {
-      console.error("Connection failed:", error);
-      
-      // Network error - backend not reachable
+      console.error('Error listing databases:', error);
       setConnectionError({
         error: "Network Error",
         message: "Unable to reach the backend server. Please ensure the server is running on port 8000.",
@@ -165,8 +167,107 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
         description: "Cannot connect to backend server",
       });
     } finally {
+      setIsLoadingDatabases(false);
+    }
+  };
+
+  const handleConnect = async () => {
+    if (!selectedDatabase) {
+      toast({
+        variant: "destructive",
+        title: "Database Required",
+        description: "Please select a database to connect to",
+      });
+      return;
+    }
+
+    setConnectionError(null);
+    setIsConnecting(true);
+
+    const portNum = parseInt(credentials.port, 10);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: credentials.host.trim(),
+          port: portNum,
+          user: credentials.user.trim(),
+          password: credentials.password,
+          database: selectedDatabase
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (data.detail && typeof data.detail === 'object') {
+          setConnectionError(data.detail);
+        } else {
+          setConnectionError({
+            error: "Connection Error",
+            message: data.message || 'Failed to connect to database',
+            code: "UNKNOWN_ERROR"
+          });
+        }
+        return;
+      }
+
+      if (data.success) {
+        toast({
+          title: "✅ Connection Successful!",
+          description: `Connected to ${selectedDatabase} database successfully.`,
+          duration: 5000,
+        });
+        
+        onConnect({
+          type: 'mysql',
+          host: credentials.host,
+          port: credentials.port,
+          user: credentials.user,
+          password: credentials.password,
+          database: selectedDatabase
+        });
+        
+        handleClose();
+      }
+    } catch (error: any) {
+      console.error('Error connecting to database:', error);
+      setConnectionError({
+        error: "Network Error",
+        message: "Unable to reach the backend server.",
+        code: "NETWORK_ERROR"
+      });
+      
+      toast({
+        variant: "destructive",
+        title: "Network Error",
+        description: "Cannot connect to backend server",
+      });
+    } finally {
       setIsConnecting(false);
     }
+  };
+
+  const handleBack = () => {
+    setCurrentStep('credentials');
+    setSelectedDatabase('');
+    setConnectionError(null);
+  };
+
+  const handleClose = () => {
+    setCurrentStep('credentials');
+    setCredentials({
+      host: '127.0.0.1',
+      port: '3306',
+      user: 'root',
+      password: ''
+    });
+    setAvailableDatabases([]);
+    setSelectedDatabase('');
+    setConnectionError(null);
+    onClose();
   };
 
   // Get appropriate icon based on error code
@@ -175,6 +276,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
     
     switch (connectionError.code) {
       case 'DATABASE_NOT_FOUND':
+      case 'NO_DATABASES':
         return <Database className="h-5 w-5" />;
       case 'AUTH_FAILED':
         return <Lock className="h-5 w-5" />;
@@ -191,63 +293,61 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
     }
   };
 
-  // Get appropriate variant based on error severity
   const getErrorVariant = (): "default" | "destructive" => {
     if (!connectionError) return "default";
     
     switch (connectionError.code) {
       case 'DATABASE_NOT_FOUND':
       case 'HOST_NOT_FOUND':
-        return "default"; // Info/warning style
-      case 'AUTH_FAILED':
-      case 'CONNECTION_REFUSED':
-      case 'CONNECTION_TIMEOUT':
-      case 'NETWORK_ERROR':
-      case 'UNKNOWN_ERROR':
+      case 'NO_DATABASES':
+        return "default";
       default:
-        return "destructive"; // Error style
+        return "destructive";
     }
   };
 
-  // Get error title with emoji
   const getErrorTitle = () => {
     if (!connectionError) return "";
     
-    switch (connectionError.code) {
-      case 'DATABASE_NOT_FOUND':
-        return "🗄️ " + connectionError.error;
-      case 'AUTH_FAILED':
-        return "🔐 " + connectionError.error;
-      case 'CONNECTION_REFUSED':
-        return "🚫 " + connectionError.error;
-      case 'CONNECTION_TIMEOUT':
-        return "⏱️ " + connectionError.error;
-      case 'HOST_NOT_FOUND':
-        return "🌐 " + connectionError.error;
-      case 'NETWORK_ERROR':
-        return "📡 " + connectionError.error;
-      default:
-        return "⚠️ " + connectionError.error;
+    const emojiMap: Record<string, string> = {
+      'DATABASE_NOT_FOUND': '🗄️',
+      'NO_DATABASES': '🗄️',
+      'AUTH_FAILED': '🔐',
+      'CONNECTION_REFUSED': '🚫',
+      'CONNECTION_TIMEOUT': '⏱️',
+      'HOST_NOT_FOUND': '🌐',
+      'NETWORK_ERROR': '📡',
+    };
+    
+    const emoji = emojiMap[connectionError.code] || '⚠️';
+    return `${emoji} ${connectionError.error}`;
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !isLoadingDatabases && !isConnecting) {
+      if (currentStep === 'credentials') {
+        handleListDatabases();
+      } else if (selectedDatabase) {
+        handleConnect();
+      }
     }
   };
 
-  // Handle Enter key press
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !isConnecting) {
-      handleConnect();
-    }
-  };
+  const isCredentialsValid = credentials.host && credentials.port && credentials.user;
   
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
+    <Dialog open={isOpen} onOpenChange={handleClose}>
       <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Database className="h-5 w-5 text-primary" />
-            Database Connection
+            {currentStep === 'credentials' ? 'Connect to MySQL Server' : 'Select Database'}
           </DialogTitle>
           <DialogDescription>
-            Connect to your MySQL database to start querying with natural language.
+            {currentStep === 'credentials' 
+              ? 'Enter your MySQL server credentials to view available databases'
+              : 'Choose a database to connect to and start querying'
+            }
           </DialogDescription>
         </DialogHeader>
 
@@ -264,7 +364,6 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                   {connectionError.message}
                 </AlertDescription>
                 
-                {/* Suggestion Box */}
                 {connectionError.suggestion && (
                   <div className="mt-3 p-3 bg-blue-50 dark:bg-blue-950 rounded-lg border border-blue-200 dark:border-blue-800 animate-in fade-in-50">
                     <div className="flex items-start gap-2">
@@ -285,123 +384,182 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
           </Alert>
         )}
 
-        {/* Connection Form */}
         <div className="space-y-4 py-2" onKeyPress={handleKeyPress}>
-          <div className="space-y-2">
-            <Label htmlFor="host" className="flex items-center gap-1">
-              Host <span className="text-red-500">*</span>
-            </Label>
-            <Input 
-              id="host" 
-              value={formData.host} 
-              onChange={(e) => handleInputChange('host', e.target.value)}
-              placeholder="127.0.0.1 or localhost"
-              disabled={isConnecting}
-              className="font-mono"
-            />
-            <p className="text-xs text-muted-foreground">
-              Server address where MySQL is running
-            </p>
-          </div>
-          
-          <div className="space-y-2">
-            <Label htmlFor="port" className="flex items-center gap-1">
-              Port <span className="text-red-500">*</span>
-            </Label>
-            <Input 
-              id="port" 
-              value={formData.port} 
-              onChange={(e) => handleInputChange('port', e.target.value)}
-              placeholder="3306"
-              disabled={isConnecting}
-              className="font-mono"
-              type="number"
-              min="1"
-              max="65535"
-            />
-            <p className="text-xs text-muted-foreground">
-              MySQL server port (default: 3306)
-            </p>
-          </div>
-          
-          <div className="space-y-2">
-            <Label htmlFor="user" className="flex items-center gap-1">
-              Username <span className="text-red-500">*</span>
-            </Label>
-            <Input 
-              id="user" 
-              value={formData.user} 
-              onChange={(e) => handleInputChange('user', e.target.value)}
-              placeholder="root"
-              disabled={isConnecting}
-              className="font-mono"
-              autoComplete="username"
-            />
-            <p className="text-xs text-muted-foreground">
-              Database username for authentication
-            </p>
-          </div>
-          
-          <div className="space-y-2">
-            <Label htmlFor="password">Password</Label>
-            <Input 
-              id="password" 
-              type="password" 
-              value={formData.password} 
-              onChange={(e) => handleInputChange('password', e.target.value)}
-              placeholder="Enter password (if any)"
-              disabled={isConnecting}
-              autoComplete="current-password"
-            />
-            <p className="text-xs text-muted-foreground">
-              Leave blank if no password is set
-            </p>
-          </div>
-          
-          <div className="space-y-2">
-            <Label htmlFor="database" className="flex items-center gap-1">
-              Database Name <span className="text-red-500">*</span>
-            </Label>
-            <Input 
-              id="database" 
-              value={formData.database} 
-              onChange={(e) => handleInputChange('database', e.target.value)}
-              placeholder="my_database"
-              disabled={isConnecting}
-              className="font-mono"
-            />
-            <p className="text-xs text-muted-foreground">
-              Name of the database you want to query
-            </p>
-          </div>
-        </div>
+          {currentStep === 'credentials' ? (
+            <>
+              {/* Step 1: Credentials Form */}
+              <div className="space-y-2">
+                <Label htmlFor="host" className="flex items-center gap-1">
+                  Host <span className="text-red-500">*</span>
+                </Label>
+                <Input 
+                  id="host" 
+                  value={credentials.host} 
+                  onChange={(e) => handleCredentialsChange('host', e.target.value)}
+                  placeholder="127.0.0.1 or localhost"
+                  disabled={isLoadingDatabases}
+                  className="font-mono"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Server address where MySQL is running
+                </p>
+              </div>
+              
+              <div className="space-y-2">
+                <Label htmlFor="port" className="flex items-center gap-1">
+                  Port <span className="text-red-500">*</span>
+                </Label>
+                <Input 
+                  id="port" 
+                  value={credentials.port} 
+                  onChange={(e) => handleCredentialsChange('port', e.target.value)}
+                  placeholder="3306"
+                  disabled={isLoadingDatabases}
+                  className="font-mono"
+                  type="number"
+                  min="1"
+                  max="65535"
+                />
+                <p className="text-xs text-muted-foreground">
+                  MySQL server port (default: 3306)
+                </p>
+              </div>
+              
+              <div className="space-y-2">
+                <Label htmlFor="user" className="flex items-center gap-1">
+                  Username <span className="text-red-500">*</span>
+                </Label>
+                <Input 
+                  id="user" 
+                  value={credentials.user} 
+                  onChange={(e) => handleCredentialsChange('user', e.target.value)}
+                  placeholder="root"
+                  disabled={isLoadingDatabases}
+                  className="font-mono"
+                  autoComplete="username"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Database username for authentication
+                </p>
+              </div>
+              
+              <div className="space-y-2">
+                <Label htmlFor="password">Password</Label>
+                <Input 
+                  id="password" 
+                  type="password" 
+                  value={credentials.password} 
+                  onChange={(e) => handleCredentialsChange('password', e.target.value)}
+                  placeholder="Enter password (if any)"
+                  disabled={isLoadingDatabases}
+                  autoComplete="current-password"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave blank if no password is set
+                </p>
+              </div>
 
-        {/* Action Buttons */}
-        <div className="flex justify-end gap-2 pt-2 border-t">
-          <Button 
-            variant="outline" 
-            onClick={onClose} 
-            disabled={isConnecting}
-          >
-            Cancel
-          </Button>
-          <Button 
-            onClick={handleConnect} 
-            disabled={isConnecting}
-            className="min-w-[120px]"
-          >
-            {isConnecting ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Connecting...
-              </>
-            ) : (
-              <>
-                <CheckCircle className="w-4 h-4 mr-2" />
-                Connect
-              </>
-            )}
-          </Button>
+              {/* Action Buttons */}
+              <div className="flex justify-end gap-2 pt-4 border-t">
+                <Button 
+                  variant="outline" 
+                  onClick={handleClose} 
+                  disabled={isLoadingDatabases}
+                >
+                  Cancel
+                </Button>
+                <Button 
+                  onClick={handleListDatabases} 
+                  disabled={!isCredentialsValid || isLoadingDatabases}
+                  className="min-w-[140px]"
+                >
+                  {isLoadingDatabases ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Loading...
+                    </>
+                  ) : (
+                    <>
+                      List Databases
+                      <ChevronRight className="w-4 h-4 ml-2" />
+                    </>
+                  )}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Step 2: Database Selection */}
+              <div className="rounded-lg bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 p-4 space-y-2">
+                <div className="flex items-center gap-2 text-sm">
+                  <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
+                  <span className="font-medium text-green-900 dark:text-green-100">
+                    Server Connected Successfully
+                  </span>
+                </div>
+                <div className="text-xs text-green-700 dark:text-green-300 pl-6 font-mono">
+                  {credentials.user}@{credentials.host}:{credentials.port}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="database" className="flex items-center gap-1">
+                  Select Database <span className="text-red-500">*</span>
+                </Label>
+                <Select
+                  value={selectedDatabase}
+                  onValueChange={setSelectedDatabase}
+                  disabled={isConnecting}
+                >
+                  <SelectTrigger id="database" className="w-full font-mono">
+                    <SelectValue placeholder="Choose a database..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableDatabases.map((db) => (
+                      <SelectItem key={db} value={db} className="font-mono">
+                        <div className="flex items-center gap-2">
+                          <Database className="h-4 w-4 text-muted-foreground" />
+                          {db}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {availableDatabases.length} database{availableDatabases.length !== 1 ? 's' : ''} available
+                </p>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex justify-between gap-2 pt-4 border-t">
+                <Button 
+                  variant="outline" 
+                  onClick={handleBack} 
+                  disabled={isConnecting}
+                >
+                  <ChevronLeft className="w-4 h-4 mr-2" />
+                  Back
+                </Button>
+                <Button 
+                  onClick={handleConnect} 
+                  disabled={!selectedDatabase || isConnecting}
+                  className="min-w-[120px]"
+                >
+                  {isConnecting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Connecting...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle className="w-4 h-4 mr-2" />
+                      Connect
+                    </>
+                  )}
+                </Button>
+              </div>
+            </>
+          )}
         </div>
       </DialogContent>
     </Dialog>

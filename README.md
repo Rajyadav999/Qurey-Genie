@@ -72,8 +72,8 @@ https://your-deployment-link-here
 - Node.js 16 or higher  
 - MySQL Server  
 - Groq API Key  
-- Docker (v20+)
-- Docker Compose (v2+)
+- Docker (v20+)  //optional
+- Docker Compose (v2+)  //optional 
 -----
 
 ## 📦 Installation & Setup
