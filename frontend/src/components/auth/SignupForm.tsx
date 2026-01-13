@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Eye, EyeOff, Loader2, Mail, UserPlus } from 'lucide-react';
+import { Eye, EyeOff, Loader2, Mail, UserPlus, Check, Sparkles } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import axios from 'axios';
 
@@ -56,7 +56,6 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
       newErrors.username = 'Username must be at least 3 characters';
     }
 
-    // ✅ UPDATED: Validate phone number format
     if (!formData.phone.trim()) {
       newErrors.phone = 'Phone number is required';
     } else if (!/^\+?[1-9]\d{9,14}$/.test(formData.phone.replace(/\s/g, ''))) {
@@ -102,21 +101,16 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
     }
   };
 
-  // ✅ UPDATED: Format phone number to E.164 format
   const formatPhoneNumber = (phone: string): string => {
-    // Remove all non-digit characters
     const cleaned = phone.replace(/\D/g, '');
-    
     
     if (phone.startsWith('+')) {
       return phone.replace(/\s/g, '');
     }
     
-    
     if (cleaned.length === 10) {
       return `+91${cleaned}`;
     }
-    
     
     if (cleaned.length > 10) {
       return `+${cleaned}`;
@@ -126,7 +120,6 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
   };
 
   const handleSendOtp = async () => {
-    // ✅ UPDATED: Validate both email and phone
     if (errors.email || !formData.email.trim()) {
       setErrors(prev => ({ ...prev, email: 'Must be a valid email address' }));
       return;
@@ -142,7 +135,6 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
       const apiUrl = `http://localhost:8000/api/send-otp`;
       const formattedPhone = formatPhoneNumber(formData.phone);
       
-     
       const response = await axios.post(apiUrl, { 
         email: formData.email,
         phone: formattedPhone
@@ -150,7 +142,6 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
       
       if (response.data.success) {
         setOtpSent(true);
-        
         setFormData(prev => ({ ...prev, phone: formattedPhone }));
         toast({
           title: "OTP Sent!",
@@ -168,300 +159,403 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
     }
   };
 
- const handleSubmit = async (e: React.FormEvent) => {
-  e.preventDefault();
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
 
-  if (!validateForm()) return;
+    if (!validateForm()) return;
 
-  try {
-    const formattedData = {
-      ...formData,
-      phone: formatPhoneNumber(formData.phone)
-    };
-    
-    const success = await signup(formattedData);
-    if (success) {
+    try {
+      const formattedData = {
+        ...formData,
+        phone: formatPhoneNumber(formData.phone)
+      };
+      
+      const success = await signup(formattedData);
+      if (success) {
+        toast({
+          title: "Account created!",
+          description: "Welcome! You have been automatically signed in.",
+        });
+      }
+    } catch (error: any) {
+      let errorMessage = "An unexpected error occurred. Please try again.";
+      let errorTitle = "Signup Failed";
+      
+      if (error.response?.data?.detail) {
+        const detail = error.response.data.detail.toLowerCase();
+        
+        if (detail.includes('email')) {
+          errorMessage = "This email is already registered. Please use a different email or try logging in.";
+          errorTitle = "Email Already Exists";
+          setErrors(prev => ({ ...prev, email: 'Email already registered' }));
+        } else if (detail.includes('username')) {
+          errorMessage = "This username is already taken. Please choose a different username.";
+          errorTitle = "Username Already Taken";
+          setErrors(prev => ({ ...prev, username: 'Username already taken' }));
+        } else if (detail.includes('phone')) {
+          errorMessage = "This phone number is already registered. Please use a different phone number.";
+          errorTitle = "Phone Already Registered";
+          setErrors(prev => ({ ...prev, phone: 'Phone number already registered' }));
+        } else if (detail.includes('otp')) {
+          errorMessage = "Invalid or expired OTP. Please request a new OTP and try again.";
+          errorTitle = "Invalid OTP";
+          setErrors(prev => ({ ...prev, otp: 'Invalid or expired OTP' }));
+        } else {
+          errorMessage = error.response.data.detail;
+        }
+      }
+      
       toast({
-        title: "Account created!",
-        description: "Welcome! You have been automatically signed in.",
+        variant: "destructive",
+        title: errorTitle,
+        description: errorMessage,
       });
     }
-  } catch (error: any) {
-    // ✅ IMPROVED: Extract and display specific backend error
-    let errorMessage = "An unexpected error occurred. Please try again.";
-    let errorTitle = "Signup Failed";
-    
-    if (error.response?.data?.detail) {
-      const detail = error.response.data.detail.toLowerCase();
-      
-      // Check for specific field errors
-      if (detail.includes('email')) {
-        errorMessage = "This email is already registered. Please use a different email or try logging in.";
-        errorTitle = "Email Already Exists";
-        // Highlight the email field
-        setErrors(prev => ({ ...prev, email: 'Email already registered' }));
-      } else if (detail.includes('username')) {
-        errorMessage = "This username is already taken. Please choose a different username.";
-        errorTitle = "Username Already Taken";
-        // Highlight the username field
-        setErrors(prev => ({ ...prev, username: 'Username already taken' }));
-      } else if (detail.includes('phone')) {
-        errorMessage = "This phone number is already registered. Please use a different phone number.";
-        errorTitle = "Phone Already Registered";
-        // Highlight the phone field
-        setErrors(prev => ({ ...prev, phone: 'Phone number already registered' }));
-      } else if (detail.includes('otp')) {
-        errorMessage = "Invalid or expired OTP. Please request a new OTP and try again.";
-        errorTitle = "Invalid OTP";
-        // Highlight the OTP field
-        setErrors(prev => ({ ...prev, otp: 'Invalid or expired OTP' }));
-      } else {
-        // Generic error from backend
-        errorMessage = error.response.data.detail;
-      }
-    }
-    
-    toast({
-      variant: "destructive",
-      title: errorTitle,
-      description: errorMessage,
-    });
-  }
-};
+  };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
-      <div className="space-y-4">
-        {/* Name Fields */}
-        <div className="grid grid-cols-2 gap-4">
+    <div className="w-full max-w-md mx-auto">
+      {/* Decorative background elements */}
+      <div className="relative">
+        <div className="absolute -top-20 -left-20 w-40 h-40 bg-purple-200 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-pulse"></div>
+        <div className="absolute -bottom-20 -right-20 w-40 h-40 bg-indigo-200 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-pulse" style={{ animationDelay: '1s' }}></div>
+      </div>
+
+      {/* Main card */}
+      <div className="relative bg-white/90 backdrop-blur-lg rounded-3xl shadow-2xl border border-gray-100 p-8">
+        {/* Header */}
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 rounded-2xl mb-4 shadow-xl transform hover:scale-105 transition-transform">
+            <UserPlus className="w-8 h-8 text-white" />
+          </div>
+          <h2 className="text-3xl font-bold bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent mb-2">
+            Create Account
+          </h2>
+          <p className="text-gray-600">Join thousands using Query Genie</p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Name Fields */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="firstName" className="text-sm font-medium text-gray-700">
+                First Name
+              </Label>
+              <div className="relative">
+                <Input
+                  id="firstName"
+                  type="text"
+                  value={formData.firstName}
+                  onChange={(e) => handleInputChange('firstName', e.target.value)}
+                  placeholder="John"
+                  className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
+                    errors.firstName 
+                      ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
+                      : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
+                  }`}
+                  disabled={isLoading}
+                />
+              </div>
+              {errors.firstName && (
+                <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                  <span>⚠️</span> {errors.firstName}
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="lastName" className="text-sm font-medium text-gray-700">
+                Last Name
+              </Label>
+              <div className="relative">
+                <Input
+                  id="lastName"
+                  type="text"
+                  value={formData.lastName}
+                  onChange={(e) => handleInputChange('lastName', e.target.value)}
+                  placeholder="Doe"
+                  className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
+                    errors.lastName 
+                      ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
+                      : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
+                  }`}
+                  disabled={isLoading}
+                />
+              </div>
+              {errors.lastName && (
+                <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                  <span>⚠️</span> {errors.lastName}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Username */}
           <div className="space-y-2">
-            <Label htmlFor="firstName" className="text-label">First Name</Label>
+            <Label htmlFor="username" className="text-sm font-medium text-gray-700">
+              Username
+            </Label>
             <Input
-              id="firstName"
+              id="username"
               type="text"
-              value={formData.firstName}
-              onChange={(e) => handleInputChange('firstName', e.target.value)}
-              placeholder="Enter first name"
-              className={`focus-brand ${errors.firstName ? 'border-destructive' : ''}`}
+              value={formData.username}
+              onChange={(e) => handleInputChange('username', e.target.value)}
+              placeholder="johndoe"
+              className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
+                errors.username 
+                  ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
+                  : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
+              }`}
               disabled={isLoading}
             />
-            {errors.firstName && (
-              <p className="text-sm text-destructive animate-in">{errors.firstName}</p>
+            {errors.username && (
+              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                <span>⚠️</span> {errors.username}
+              </p>
             )}
           </div>
+
+          {/* Phone */}
           <div className="space-y-2">
-            <Label htmlFor="lastName" className="text-label">Last Name</Label>
+            <Label htmlFor="phone" className="text-sm font-medium text-gray-700">
+              Phone Number
+            </Label>
             <Input
-              id="lastName"
-              type="text"
-              value={formData.lastName}
-              onChange={(e) => handleInputChange('lastName', e.target.value)}
-              placeholder="Enter last name"
-              className={`focus-brand ${errors.lastName ? 'border-destructive' : ''}`}
+              id="phone"
+              type="tel"
+              value={formData.phone}
+              onChange={(e) => handleInputChange('phone', e.target.value)}
+              placeholder="+919876543210 or 9876543210"
+              className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
+                errors.phone 
+                  ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
+                  : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
+              }`}
               disabled={isLoading}
             />
-            {errors.lastName && (
-              <p className="text-sm text-destructive animate-in">{errors.lastName}</p>
+            <p className="text-xs text-gray-500">Format: +[country code][number]</p>
+            {errors.phone && (
+              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                <span>⚠️</span> {errors.phone}
+              </p>
             )}
           </div>
-        </div>
 
-        {/* Username Field */}
-        <div className="space-y-2">
-          <Label htmlFor="username" className="text-label">Username</Label>
-          <Input
-            id="username"
-            type="text"
-            value={formData.username}
-            onChange={(e) => handleInputChange('username', e.target.value)}
-            placeholder="Choose a username"
-            className={`focus-brand ${errors.username ? 'border-destructive' : ''}`}
-            disabled={isLoading}
-          />
-          {errors.username && (
-            <p className="text-sm text-destructive animate-in">{errors.username}</p>
+          {/* Gender */}
+          <div className="space-y-2">
+            <Label htmlFor="gender" className="text-sm font-medium text-gray-700">
+              Gender
+            </Label>
+            <Select
+              value={formData.gender}
+              onValueChange={(value) => handleInputChange('gender', value)}
+              disabled={isLoading}
+            >
+              <SelectTrigger className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
+                errors.gender 
+                  ? 'border-red-300 focus:border-red-500' 
+                  : 'border-gray-200 focus:border-indigo-500'
+              }`}>
+                <SelectValue placeholder="Select gender" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="Male">Male</SelectItem>
+                <SelectItem value="Female">Female</SelectItem>
+                <SelectItem value="Non-binary">Non-binary</SelectItem>
+                <SelectItem value="Prefer not to say">Prefer not to say</SelectItem>
+              </SelectContent>
+            </Select>
+            {errors.gender && (
+              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                <span>⚠️</span> {errors.gender}
+              </p>
+            )}
+          </div>
+
+          {/* Email with OTP */}
+          <div className="space-y-2">
+            <Label htmlFor="email" className="text-sm font-medium text-gray-700">
+              Email Address
+            </Label>
+            <div className="relative">
+              <Input
+                id="email"
+                type="email"
+                value={formData.email}
+                onChange={(e) => handleInputChange('email', e.target.value)}
+                placeholder="john@example.com"
+                className={`h-11 px-4 pr-12 rounded-xl border-2 transition-all duration-200 ${
+                  otpSent ? 'bg-gray-50' : ''
+                } ${
+                  errors.email 
+                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
+                    : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
+                }`}
+                disabled={isLoading || otpSent}
+              />
+              {!otpSent && (
+                <button
+                  type="button"
+                  onClick={handleSendOtp}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-indigo-600 hover:text-indigo-700 disabled:opacity-50 p-2 hover:bg-indigo-50 rounded-lg transition-all"
+                  disabled={isSendingOtp || isLoading || !!errors.email || !!errors.phone}
+                >
+                  {isSendingOtp ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <Mail size={20} />
+                  )}
+                </button>
+              )}
+              {otpSent && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1 text-green-600 bg-green-50 px-2 py-1 rounded-lg">
+                  <Check size={16} />
+                  <span className="text-xs font-medium">Sent</span>
+                </div>
+              )}
+            </div>
+            {errors.email && (
+              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                <span>⚠️</span> {errors.email}
+              </p>
+            )}
+          </div>
+
+          {/* OTP Field */}
+          {otpSent && (
+            <div className="space-y-2 animate-in slide-in-from-top-2">
+              <Label htmlFor="otp" className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                Verification Code
+                <Sparkles className="w-4 h-4 text-indigo-500" />
+              </Label>
+              <Input
+                id="otp"
+                type="text"
+                value={formData.otp}
+                onChange={(e) => handleInputChange('otp', e.target.value)}
+                placeholder="• • • • • •"
+                maxLength={6}
+                className={`h-12 px-4 rounded-xl border-2 text-center text-xl font-semibold tracking-[0.5em] transition-all duration-200 ${
+                  errors.otp 
+                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
+                    : 'border-indigo-300 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 bg-indigo-50/30'
+                }`}
+                disabled={isLoading}
+              />
+              {errors.otp && (
+                <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                  <span>⚠️</span> {errors.otp}
+                </p>
+              )}
+            </div>
           )}
-        </div>
 
-        {/* ✅ UPDATED: Phone Number Field */}
-        <div className="space-y-2">
-          <Label htmlFor="phone" className="text-label">Phone Number</Label>
-          <Input
-            id="phone"
-            type="tel"
-            value={formData.phone}
-            onChange={(e) => handleInputChange('phone', e.target.value)}
-            placeholder="+919876543210 or 9876543210"
-            className={`focus-brand ${errors.phone ? 'border-destructive' : ''}`}
-            disabled={isLoading}
-          />
-          <p className="text-xs text-muted-foreground">Format: +[country code][number]</p>
-          {errors.phone && (
-            <p className="text-sm text-destructive animate-in">{errors.phone}</p>
-          )}
-        </div>
-
-        {/* Gender Field */}
-        <div className="space-y-2">
-          <Label htmlFor="gender" className="text-label">Gender</Label>
-          <Select
-            value={formData.gender}
-            onValueChange={(value) => handleInputChange('gender', value)}
-            disabled={isLoading}
-          >
-            <SelectTrigger className={`focus-brand ${errors.gender ? 'border-destructive' : ''}`}>
-              <SelectValue placeholder="Select gender" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="Male">Male</SelectItem>
-              <SelectItem value="Female">Female</SelectItem>
-              <SelectItem value="Non-binary">Non-binary</SelectItem>
-              <SelectItem value="Prefer not to say">Prefer not to say</SelectItem>
-            </SelectContent>
-          </Select>
-          {errors.gender && (
-            <p className="text-sm text-destructive animate-in">{errors.gender}</p>
-          )}
-        </div>
-
-        {/* Email Field with OTP */}
-        <div className="space-y-2">
-          <Label htmlFor="email" className="text-label">Email</Label>
-          <div className="relative">
-            <Input
-              id="email"
-              type="email"
-              value={formData.email}
-              onChange={(e) => handleInputChange('email', e.target.value)}
-              placeholder="Enter email"
-              className={`focus-brand pr-20 ${errors.email ? 'border-destructive' : ''}`}
-              disabled={isLoading || otpSent}
-            />
-            {!otpSent && (
+          {/* Password */}
+          <div className="space-y-2">
+            <Label htmlFor="password" className="text-sm font-medium text-gray-700">
+              Password
+            </Label>
+            <div className="relative">
+              <Input
+                id="password"
+                type={showPassword ? 'text' : 'password'}
+                value={formData.password}
+                onChange={(e) => handleInputChange('password', e.target.value)}
+                placeholder="Enter password"
+                className={`h-11 px-4 pr-12 rounded-xl border-2 transition-all duration-200 ${
+                  errors.password 
+                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
+                    : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
+                }`}
+                disabled={isLoading}
+              />
               <button
                 type="button"
-                onClick={handleSendOtp}
-                className="absolute right-3 top-1/2 transform -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1"
-                disabled={isSendingOtp || isLoading || !!errors.email || !!errors.phone}
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 hover:bg-gray-100 rounded transition-all"
+                disabled={isLoading}
               >
-                {isSendingOtp ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail size={16} />}
+                {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
               </button>
+            </div>
+            {errors.password && (
+              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                <span>⚠️</span> {errors.password}
+              </p>
             )}
           </div>
-          {errors.email && (
-            <p className="text-sm text-destructive animate-in">{errors.email}</p>
-          )}
-        </div>
 
-        {/* OTP Field (conditional) */}
-        {otpSent && (
+          {/* Confirm Password */}
           <div className="space-y-2">
-            <Label htmlFor="otp" className="text-label">Verification Code (OTP)</Label>
-            <Input
-              id="otp"
-              type="text"
-              value={formData.otp}
-              onChange={(e) => handleInputChange('otp', e.target.value)}
-              placeholder="Enter 6-digit OTP"
-              className={`focus-brand ${errors.otp ? 'border-destructive' : ''}`}
-              disabled={isLoading}
-              maxLength={6}
-            />
-            {errors.otp && (
-              <p className="text-sm text-destructive animate-in">{errors.otp}</p>
+            <Label htmlFor="confirmPassword" className="text-sm font-medium text-gray-700">
+              Confirm Password
+            </Label>
+            <div className="relative">
+              <Input
+                id="confirmPassword"
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={formData.confirmPassword}
+                onChange={(e) => handleInputChange('confirmPassword', e.target.value)}
+                placeholder="Confirm password"
+                className={`h-11 px-4 pr-12 rounded-xl border-2 transition-all duration-200 ${
+                  errors.confirmPassword 
+                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
+                    : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
+                }`}
+                disabled={isLoading}
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 hover:bg-gray-100 rounded transition-all"
+                disabled={isLoading}
+              >
+                {showConfirmPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+              </button>
+            </div>
+            {errors.confirmPassword && (
+              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
+                <span>⚠️</span> {errors.confirmPassword}
+              </p>
             )}
           </div>
-        )}
 
-        {/* Password Field */}
-        <div className="space-y-2">
-          <Label htmlFor="password" className="text-label">Password</Label>
-          <div className="relative">
-            <Input
-              id="password"
-              type={showPassword ? 'text' : 'password'}
-              value={formData.password}
-              onChange={(e) => handleInputChange('password', e.target.value)}
-              placeholder="Enter password"
-              className={`focus-brand pr-12 ${errors.password ? 'border-destructive' : ''}`}
-              disabled={isLoading}
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword(!showPassword)}
-              className="absolute right-3 top-1/2 transform -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-              disabled={isLoading}
-            >
-              {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-            </button>
-          </div>
-          {errors.password && (
-            <p className="text-sm text-destructive animate-in">{errors.password}</p>
-          )}
-        </div>
-
-        {/* Confirm Password Field */}
-        <div className="space-y-2">
-          <Label htmlFor="confirmPassword" className="text-label">Confirm Password</Label>
-          <div className="relative">
-            <Input
-              id="confirmPassword"
-              type={showConfirmPassword ? 'text' : 'password'}
-              value={formData.confirmPassword}
-              onChange={(e) => handleInputChange('confirmPassword', e.target.value)}
-              placeholder="Confirm password"
-              className={`focus-brand pr-12 ${errors.confirmPassword ? 'border-destructive' : ''}`}
-              disabled={isLoading}
-            />
-            <button
-              type="button"
-              onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-              className="absolute right-3 top-1/2 transform -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-              disabled={isLoading}
-            >
-              {showConfirmPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-            </button>
-          </div>
-          {errors.confirmPassword && (
-            <p className="text-sm text-destructive animate-in">{errors.confirmPassword}</p>
-          )}
-        </div>
-      </div>
-
-      {/* Submit Button */}
-      <Button 
-        type="submit" 
-        className="w-full gradient-brand hover:shadow-brand transition-all duration-200"
-        disabled={isLoading || !otpSent}
-      >
-        {isLoading ? (
-          <>
-            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-            Creating Account...
-          </>
-        ) : (
-          <>
-            <UserPlus className="w-4 h-4 mr-2" />
-            Create Account
-          </>
-        )}
-      </Button>
-
-      {/* Switch to Login */}
-      <div className="text-center">
-        <p className="text-caption">
-          Already have an account?{' '}
-          <button
-            type="button"
-            onClick={onSwitchToLogin}
-            className="text-brand-600 hover:text-brand-700 font-medium transition-colors"
-            disabled={isLoading}
+          {/* Submit Button */}
+          <Button 
+            type="submit" 
+            className="w-full h-12 mt-6 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-700 hover:via-purple-700 hover:to-pink-700 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all duration-200 hover:scale-[1.02] active:scale-[0.98]"
+            disabled={isLoading || !otpSent}
           >
-            Sign In
-          </button>
-        </p>
+            {isLoading ? (
+              <>
+                <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                Creating Account...
+              </>
+            ) : (
+              <>
+                <UserPlus className="w-5 h-5 mr-2" />
+                Create Account
+              </>
+            )}
+          </Button>
+
+          {/* Switch to Login */}
+          <div className="text-center pt-4">
+            <p className="text-sm text-gray-600">
+              Already have an account?{' '}
+              <button
+                type="button"
+                onClick={onSwitchToLogin}
+                className="text-indigo-600 hover:text-indigo-700 font-semibold transition-colors hover:underline"
+                disabled={isLoading}
+              >
+                Sign In
+              </button>
+            </p>
+          </div>
+        </form>
       </div>
-    </form>
+    </div>
   );
 };
 

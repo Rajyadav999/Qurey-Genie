@@ -238,6 +238,14 @@ class OTP(Base):
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+class PasswordResetOTP(Base):
+    """New table for password reset OTPs"""
+    __tablename__ = "password_reset_otps"
+    email = Column(String, primary_key=True, index=True)
+    otp = Column(String, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 # Create all tables
 Base.metadata.create_all(engine)
 
@@ -341,6 +349,14 @@ class UserLogin(BaseModel):
 class OtpRequest(BaseModel):
     email: EmailStr
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+
 class ConfirmSQLRequest(BaseModel):
     user_id: int
     confirm: bool
@@ -391,6 +407,59 @@ def send_otp_email(recipient_email: str, otp: str) -> bool:
         return True
     except Exception as e:
         print(f"[OTP] Failed to send email to {recipient_email}: {e}")
+        return False
+    
+def send_password_reset_email(recipient_email: str, otp: str) -> bool:
+    """Send password reset OTP email"""
+    if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
+        print(f"[PASSWORD RESET] Missing credentials; OTP for {recipient_email}: {otp}")
+        return False
+    
+    message = MIMEMultipart("alternative")
+    message["Subject"] = "Password Reset Code - Query Genie"
+    message["From"] = EMAIL_HOST_USER
+    message["To"] = recipient_email
+    
+    html = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
+        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <div style="background: linear-gradient(135deg, #667eea, #764ba2); padding: 30px; text-align: center;">
+                <h1 style="color: white; margin: 0;">Password Reset</h1>
+            </div>
+            
+            <div style="padding: 30px;">
+                <p style="color: #666; margin-bottom: 20px;">
+                    Use this code to reset your Query Genie password:
+                </p>
+                
+                <div style="text-align: center; margin: 25px 0;">
+                    <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; border: 2px dashed #667eea;">
+                        <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #667eea;">
+                            {otp}
+                        </span>
+                    </div>
+                </div>
+                
+                <p style="color: #666; font-size: 14px;">
+                    Expires in <strong>10 minutes</strong>. Didn't request this? Ignore this email.
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    message.attach(MIMEText(html, "html"))
+    
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
+            server.sendmail(EMAIL_HOST_USER, recipient_email, message.as_string())
+        print(f"[PASSWORD RESET] Sent to {recipient_email}")
+        return True
+    except Exception as e:
+        print(f"[PASSWORD RESET] Failed for {recipient_email}: {e}")
         return False
 
 # SQL Safety
@@ -1243,6 +1312,217 @@ async def delete_chat_session(session_id: int, user_id: int = Query(...)):
     finally:
         db_session.close()
 
+@app.post("/api/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Send OTP for password reset"""
+    try:
+        user = db.query(User).filter(User.email == request.email).first()
+        if not user:
+            return {
+                "success": True,
+                "message": "If an account exists with this email, you will receive a password reset code."
+            }
+        
+        otp = generate_otp()
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        
+        db.query(PasswordResetOTP).filter(PasswordResetOTP.email == request.email).delete()
+        
+        db_otp = PasswordResetOTP(
+            email=request.email,
+            otp=otp,
+            expires_at=expires_at
+        )
+        db.add(db_otp)
+        db.commit()
+        
+        email_sent = send_password_reset_email(request.email, otp)
+        
+        if email_sent:
+            message = "Password reset code has been sent to your email."
+        else:
+            message = "Email unavailable; check server logs for reset code."
+        
+        print(f"[PASSWORD RESET] Generated OTP for {request.email}: {otp}")
+        
+        return {
+            "success": True,
+            "message": message
+        }
+    
+    except Exception as e:
+        print(f"[PASSWORD RESET ERROR] {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to process password reset request. Please try again."
+        )
+
+@app.post("/api/verify-reset-otp")
+async def verify_reset_otp(request: dict, db: Session = Depends(get_db)):
+    """Verify OTP for password reset"""
+    try:
+        email = request.get("email")
+        otp = request.get("otp")
+        
+        if not email or not otp:
+            raise HTTPException(status_code=400, detail="Email and OTP are required")
+        
+        stored_otp = db.query(PasswordResetOTP).filter(
+            PasswordResetOTP.email == email
+        ).first()
+        
+        if not stored_otp:
+            raise HTTPException(
+                status_code=400,
+                detail="Reset code not found or expired. Please request a new one."
+            )
+        
+        now = datetime.now(timezone.utc)
+        expires_at = make_tz_aware(stored_otp.expires_at)
+        
+        if now > expires_at:
+            db.delete(stored_otp)
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="Reset code has expired. Please request a new one."
+            )
+        
+        if stored_otp.otp != otp:
+            raise HTTPException(status_code=400, detail="Invalid reset code.")
+        
+        return {
+            "success": True,
+            "message": "Reset code verified successfully."
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[VERIFY OTP ERROR] {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to verify reset code. Please try again."
+        )
+
+@app.post("/api/reset-password")
+async def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Reset password with OTP verification"""
+    try:
+        stored_otp = db.query(PasswordResetOTP).filter(
+            PasswordResetOTP.email == request.email
+        ).first()
+        
+        if not stored_otp:
+            raise HTTPException(
+                status_code=400,
+                detail="Reset code not found or expired."
+            )
+        
+        now = datetime.now(timezone.utc)
+        expires_at = make_tz_aware(stored_otp.expires_at)
+        
+        if now > expires_at:
+            db.delete(stored_otp)
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="Reset code has expired."
+            )
+        
+        if stored_otp.otp != request.otp:
+            raise HTTPException(status_code=400, detail="Invalid reset code.")
+        
+        user = db.query(User).filter(User.email == request.email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+        
+        if len(request.new_password) < 8:
+            raise HTTPException(
+                status_code=400,
+                detail="Password must be at least 8 characters long."
+            )
+        
+        user.hashed_password = get_password_hash(request.new_password)
+        
+        db.delete(stored_otp)
+        
+        db.commit()
+        
+        print(f"[PASSWORD RESET] Password reset successful for {request.email}")
+        
+        return {
+            "success": True,
+            "message": "Password has been reset successfully. You can now login with your new password."
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db.rollback()
+        print(f"[RESET PASSWORD ERROR] {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to reset password. Please try again."
+        )
+
+@app.post("/api/resend-reset-otp")
+async def resend_reset_otp(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Resend OTP for password reset"""
+    try:
+        user = db.query(User).filter(User.email == request.email).first()
+        if not user:
+            return {
+                "success": True,
+                "message": "If an account exists with this email, you will receive a new reset code."
+            }
+        
+        existing_otp = db.query(PasswordResetOTP).filter(
+            PasswordResetOTP.email == request.email
+        ).first()
+        
+        if existing_otp:
+            created_at = make_tz_aware(existing_otp.created_at)
+            time_since_last = datetime.now(timezone.utc) - created_at
+            
+            if time_since_last < timedelta(minutes=1):
+                wait_seconds = 60 - time_since_last.seconds
+                return {
+                    "success": False,
+                    "message": f"Please wait {wait_seconds} seconds before requesting a new code."
+                }
+        
+        otp = generate_otp()
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        
+        db.query(PasswordResetOTP).filter(
+            PasswordResetOTP.email == request.email
+        ).delete()
+        
+        db_otp = PasswordResetOTP(
+            email=request.email,
+            otp=otp,
+            expires_at=expires_at
+        )
+        db.add(db_otp)
+        db.commit()
+        
+        email_sent = send_password_reset_email(request.email, otp)
+        
+        print(f"[RESEND OTP] New OTP for {request.email}: {otp}")
+        
+        return {
+            "success": True,
+            "message": "A new reset code has been sent to your email."
+        }
+    
+    except Exception as e:
+        print(f"[RESEND OTP ERROR] {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to resend reset code. Please try again."
+        )
+    
 @app.post("/api/confirm-sql")
 async def confirm_sql_action(req: ConfirmSQLRequest):
     """Confirm and execute dangerous SQL"""

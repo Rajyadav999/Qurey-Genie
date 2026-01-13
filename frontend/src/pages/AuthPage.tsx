@@ -9,7 +9,10 @@ const AuthPage = () => {
   return (
     <AuthLayout 
       title={isSignup ? 'Create Account' : 'Welcome Back'}
-      subtitle={isSignup ? 'Join Query Genie and unlock AI-powered database interactions' : 'Sign in to continue your database journey'}
+      subtitle={isSignup 
+        ? 'Join Query Genie and unlock AI-powered database interactions' 
+        : 'Sign in to continue your database journey'
+      }
     >
       {isSignup ? (
         <SignupForm onSwitchToLogin={() => setIsSignup(false)} />

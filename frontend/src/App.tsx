@@ -16,30 +16,50 @@ const queryClient = new QueryClient();
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { isAuthenticated, isLoading } = useAuth();
   
+  console.log('[PROTECTED_ROUTE] isAuthenticated:', isAuthenticated, 'isLoading:', isLoading);
+  
   if (isLoading) {
     return (
-      <div className="h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-600"></div>
+      <div className="h-screen flex items-center justify-center bg-gradient-to-br from-brand-50 via-background to-brand-100">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-brand-600 mx-auto mb-4"></div>
+          <p className="text-muted-foreground font-medium">Loading...</p>
+        </div>
       </div>
     );
   }
   
-  return isAuthenticated ? <>{children}</> : <Navigate to="/auth" replace />;
+  if (!isAuthenticated) {
+    console.log('[PROTECTED_ROUTE] Not authenticated, redirecting to /auth');
+    return <Navigate to="/auth" replace />;
+  }
+  
+  return <>{children}</>;
 };
 
 // Public Route Component (redirects authenticated users)
 const PublicRoute = ({ children }: { children: React.ReactNode }) => {
   const { isAuthenticated, isLoading } = useAuth();
   
+  console.log('[PUBLIC_ROUTE] isAuthenticated:', isAuthenticated, 'isLoading:', isLoading);
+  
   if (isLoading) {
     return (
-      <div className="h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-600"></div>
+      <div className="h-screen flex items-center justify-center bg-gradient-to-br from-brand-50 via-background to-brand-100">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-brand-600 mx-auto mb-4"></div>
+          <p className="text-muted-foreground font-medium">Loading...</p>
+        </div>
       </div>
     );
   }
   
-  return isAuthenticated ? <Navigate to="/dashboard" replace /> : <>{children}</>;
+  if (isAuthenticated) {
+    console.log('[PUBLIC_ROUTE] Already authenticated, redirecting to /dashboard');
+    return <Navigate to="/dashboard" replace />;
+  }
+  
+  return <>{children}</>;
 };
 
 const AppRoutes = () => (
@@ -64,12 +84,10 @@ const AppRoutes = () => (
       } 
     />
     
-    {/* Root redirect */}
+    {/* Root redirect - Goes to /auth first, then PublicRoute handles authenticated users */}
     <Route 
       path="/" 
-      element={
-        <Navigate to="/dashboard" replace />
-      } 
+      element={<Navigate to="/auth" replace />} 
     />
     
     {/* 404 */}
