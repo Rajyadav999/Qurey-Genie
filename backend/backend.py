@@ -328,6 +328,14 @@ class DBSelection(BaseModel):
     password: str = ""
     database: str
 
+class DBCreate(BaseModel):
+    """Step 2.5: Create new database"""
+    host: str
+    port: int
+    user: str
+    password: str = ""
+    database_name: str  # New database name to create
+
 class ChatRequest(BaseModel):
     question: str
     chat_history: list
@@ -571,32 +579,28 @@ def extract_table_name_from_query(sql_query: str) -> str:
 # ============= ✅ FIX #5: OPTIMIZED LANGCHAIN WITH CACHING =============
 def get_sql_chain(cached_schema: str):
     """Create LangChain with pre-fetched schema and improved prompt"""
-    template = """
-    You are a MySQL expert. Given the schema and chat history, generate a SINGLE valid MySQL statement (DDL, DML, DCL, TCL, or queries with JOINS/CONSTRAINTS/TRIGGERS).
-    Include only the SQL; no explanations, markdown, or extra text.
+    template = """You are a MySQL expert. Generate ONLY valid MySQL statements - no explanations, markdown, or extra text.
 
-    IMPORTANT RULES:
-    1. For "show tables" or "list tables" or "what tables" → Use: SHOW TABLES;
-    2. For "show all data" or "all records" from a table → Use: SELECT * FROM table_name;
-    3. For "count" or "number of" or "how many" or "total" (when asking for COUNT) → Use: SELECT COUNT(*) as count FROM table_name;
-    4. For "number of tables" or "how many tables" or "total tables" or "total number of tables" or "count tables" → Use: SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = DATABASE();
-    5. For "show tables with names" or "list all table names" (when user wants to SEE the list) → Use: SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema = DATABASE();
-    6. Always return ONLY the SQL statement with NO explanations, markdown, or formatting
-    7. For SHOW commands, return them exactly as: SHOW TABLES; or SHOW DATABASES;
-    8. NEVER combine COUNT(*) with non-aggregated columns without GROUP BY
-    9. Keywords "total", "count", "how many", "number of" always mean use COUNT(*) aggregation
+QUERY PATTERNS:
+- "show tables" / "list tables" → SHOW TABLES;
+- "show all data" / "all records from X" → SELECT * FROM X;
+- "count" / "how many" / "total" → SELECT COUNT(*) as count FROM table;
+- "table count" / "number of tables" → SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = DATABASE();
+- "table names list" → SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema = DATABASE();
+- "current database" / "database name" / "which database" → SELECT DATABASE() as current_database;
+- "all databases" / "list databases" → SHOW DATABASES;
 
-    Schema:
-    {schema}
+RULES:
+- Return ONLY SQL, no ```sql blocks or comments
+- Never mix COUNT(*) with non-aggregated columns without GROUP BY
+- Use DATABASE() for current database, SHOW DATABASES for all databases
 
-    Chat History:
-    {chat_history}
+Schema: {schema}
+History: {chat_history}
+Question: {question}
 
-    User Question:
-    {question}
-
-    Your response must contain ONLY the SQL statement. Do NOT add any extra text, commentary, or code formatting like ```sql.
-    """
+SQL:"""
+    
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatGroq(api_key=groq_api_key, model="llama-3.1-8b-instant", temperature=0)
     
@@ -609,6 +613,7 @@ def get_sql_chain(cached_schema: str):
         | llm
         | StrOutputParser()
     )
+
 def get_response(question, db, chat_history, db_uri, cached_schema):
     """Optimized response generation with better handling for SHOW commands"""
     
@@ -997,6 +1002,118 @@ async def list_databases(creds: DBCredentials):
             }
         )
 
+@app.post("/api/create-database")
+async def create_database(config: DBCreate):
+    """Create a new database on the MySQL server"""
+    print(f"[CREATE DB] Request to create database: {config.database_name}")
+    
+    try:
+        # Validate database name (alphanumeric and underscores only)
+        if not re.match(r'^[a-zA-Z0-9_]+$', config.database_name):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "error": "Invalid Database Name",
+                    "message": "Database name can only contain letters, numbers, and underscores.",
+                    "code": "INVALID_NAME"
+                }
+            )
+        
+        # Check if database name is too long
+        if len(config.database_name) > 64:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "error": "Name Too Long",
+                    "message": "Database name must be 64 characters or less.",
+                    "code": "NAME_TOO_LONG"
+                }
+            )
+        
+        # Connect to MySQL server without specifying database
+        db_uri = f"mysql+mysqlconnector://{config.user}:{config.password}@{config.host}:{config.port}"
+        
+        # Create temporary engine
+        temp_engine = create_engine(
+            db_uri,
+            poolclass=pool.NullPool,
+            echo=False
+        )
+        
+        # Create the database
+        with temp_engine.connect() as conn:
+            # Check if database already exists
+            result = conn.execute(text("SHOW DATABASES"))
+            existing_databases = [row[0] for row in result]
+            
+            if config.database_name in existing_databases:
+                temp_engine.dispose()
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "success": False,
+                        "error": "Database Already Exists",
+                        "message": f"Database '{config.database_name}' already exists.",
+                        "code": "DATABASE_EXISTS"
+                    }
+                )
+            
+            # Create the database
+            conn.execute(text(f"CREATE DATABASE `{config.database_name}`"))
+            conn.commit()
+        
+        temp_engine.dispose()
+        
+        print(f"[CREATE DB] Successfully created database: {config.database_name}")
+        return {
+            "success": True,
+            "database_name": config.database_name,
+            "message": f"Database '{config.database_name}' created successfully"
+        }
+    
+    except HTTPException as e:
+        raise e
+    
+    except OperationalError as e:
+        error_msg = str(e)
+        print(f"[CREATE DB] OperationalError: {error_msg}")
+        
+        if "Access denied" in error_msg or "1044" in error_msg:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "success": False,
+                    "error": "Permission Denied",
+                    "message": "Your MySQL user does not have permission to create databases.",
+                    "code": "PERMISSION_DENIED"
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "success": False,
+                    "error": "Database Creation Failed",
+                    "message": error_msg,
+                    "code": "CREATION_ERROR"
+                }
+            )
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[CREATE DB] Unexpected error: {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "success": False,
+                "error": "Unknown Error",
+                "message": error_msg,
+                "code": "UNKNOWN_ERROR"
+            }
+        )
+    
 @app.post("/api/connect")
 async def connect_db(config: DBSelection):
     """Connect to MySQL database with connection pooling"""
