@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
+import axios from 'axios';
 
 interface User {
   id: string;
@@ -11,10 +12,23 @@ interface User {
   gender: string;
 }
 
+interface SignupData {
+  firstName: string;
+  lastName: string;
+  username: string;
+  phone: string;
+  gender: string;
+  email: string;
+  password: string;
+  confirmPassword: string;
+  otp: string;
+}
+
 interface AuthContextType {
   user: User | null;
   logout: () => void;
   refreshUser: () => void;
+  signup: (data: SignupData) => Promise<boolean>;
   isAuthenticated: boolean;
   isLoading: boolean;
 }
@@ -104,6 +118,60 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     loadUserFromStorage();
   };
 
+  // Signup function
+  const signup = async (data: SignupData): Promise<boolean> => {
+    setIsLoading(true);
+    try {
+      console.log('[AUTH] Signup attempt for:', data.email);
+      
+      const response = await axios.post('http://localhost:8000/api/signup', {
+        first_name: data.firstName,
+        last_name: data.lastName,
+        username: data.username,
+        phone: data.phone,
+        gender: data.gender,
+        email: data.email,
+        password: data.password,
+        otp: data.otp
+      });
+
+      if (response.data.success && response.data.user) {
+        const newUser: User = {
+          id: response.data.user.id,
+          firstName: response.data.user.first_name,
+          lastName: response.data.user.last_name,
+          username: response.data.user.username,
+          email: response.data.user.email,
+          phone: response.data.user.phone,
+          gender: response.data.user.gender
+        };
+
+        console.log('[AUTH] Signup successful, saving user:', newUser.username);
+        
+        // Save to localStorage
+        localStorage.setItem('query-genie-user', JSON.stringify(newUser));
+        
+        // Update state
+        setUser(newUser);
+        
+        // Dispatch custom event for other components
+        window.dispatchEvent(new CustomEvent('userLogin'));
+        
+        // Navigate to dashboard
+        navigate('/dashboard');
+        
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('[AUTH] Signup failed:', error);
+      throw error;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const logout = () => {
     console.log('[AUTH] Logout called');
     setUser(null);
@@ -115,6 +183,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     user,
     logout,
     refreshUser,
+    signup,
     isAuthenticated: !!user,
     isLoading
   };

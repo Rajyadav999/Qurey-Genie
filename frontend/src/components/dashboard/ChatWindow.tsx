@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AlertCircle, Database, CheckCircle2, Copy, Check, Edit2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -66,6 +66,11 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
+  const [userScrolled, setUserScrolled] = useState(false);
+  
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const lastMessageCountRef = useRef(0);
 
   const lastUserMessageId = React.useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -77,6 +82,67 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
     }
     return null;
   }, [messages]);
+
+  // Smooth scroll to bottom function
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' });
+  };
+
+  // Check if user is near bottom of chat
+  const isNearBottom = () => {
+    if (!chatContainerRef.current) return true;
+    
+    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    
+    // Consider "near bottom" if within 100px
+    return distanceFromBottom < 100;
+  };
+
+  // Handle user scroll to detect manual scrolling
+  const handleScroll = () => {
+    if (!chatContainerRef.current) return;
+    
+    // If user manually scrolls up, set flag
+    if (!isNearBottom()) {
+      setUserScrolled(true);
+    } else {
+      setUserScrolled(false);
+    }
+  };
+
+  // Auto-scroll when new messages arrive
+  useEffect(() => {
+    const messageCountChanged = messages.length !== lastMessageCountRef.current;
+    const hasMessages = messages.length > 0;
+    
+    if (messageCountChanged && hasMessages) {
+      const lastMessage = messages[messages.length - 1];
+      const isAssistantMessage = lastMessage.role === 'ai' || lastMessage.type === 'assistant';
+      
+      // Auto-scroll if:
+      // 1. User hasn't manually scrolled up, OR
+      // 2. It's a new assistant message (AI response)
+      if (!userScrolled || isAssistantMessage) {
+        // Use instant scroll for first message, smooth for others
+        const behavior = lastMessageCountRef.current === 0 ? 'instant' : 'smooth';
+        
+        // Small delay to ensure DOM has updated
+        setTimeout(() => {
+          scrollToBottom(behavior);
+        }, 100);
+      }
+      
+      lastMessageCountRef.current = messages.length;
+    }
+  }, [messages, userScrolled]);
+
+  // Reset scroll flag when editing stops
+  useEffect(() => {
+    if (!editingMessageId) {
+      setUserScrolled(false);
+    }
+  }, [editingMessageId]);
 
   const handleCopyMessage = async (messageId: string, content: string, isUser: boolean) => {
     try {
@@ -135,7 +201,11 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
   };
   
   return (
-    <div className="flex-1 overflow-y-auto bg-white">
+    <div 
+      ref={chatContainerRef}
+      onScroll={handleScroll}
+      className="flex-1 overflow-y-auto bg-white"
+    >
       <div className="max-w-4xl mx-auto px-4">
         <div className="space-y-6 [&>*:first-child]:!mt-0 [&>*:first-child]:!pt-0 pb-4">
         {messages.length === 0 ? (
@@ -144,22 +214,9 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
               Welcome to Query Genie
             </h2>
             <p className="text-lg text-gray-600 mb-8">
-              An AI-powered database interaction platform that helps you explore and analyze your data using natural language
+             Ask questions in plain English and get instant answers from your database—no SQL required
             </p>
-            <div className="space-y-4 text-left">
-              <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-sm font-semibold">1</span>
-                <p className="text-gray-900">Connect to your data source</p>
-              </div>
-              <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-sm font-semibold">2</span>
-                <p className="text-gray-900">Ask questions in natural language</p>
-              </div>
-              <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-sm font-semibold">3</span>
-                <p className="text-gray-900">Get instant insights and results</p>
-              </div>
-            </div>
+           
           </div>
         ) : (
           messages.map((message) => {
@@ -168,7 +225,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
             if (effectiveType === 'user') {
               const isEditing = editingMessageId === message.id;
               const isLastUserMessage = message.id === lastUserMessageId;
-              const canEditMessage = message.canEdit !== false; // Check if editing is allowed
+              const canEditMessage = message.canEdit !== false;
               
               return (
                 <div key={message.id} className="flex justify-end group">
@@ -367,6 +424,8 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
             return null;
           })
         )}
+        {/* Invisible element to scroll to */}
+        <div ref={messagesEndRef} />
       </div>
     </div>
     </div>
