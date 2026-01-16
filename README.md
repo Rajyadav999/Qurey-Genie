@@ -183,7 +183,7 @@ Access the application at `http://localhost:5173`
    - Port
    - Username
    - Password
-   - Database name
+   - Select database or create new database
 
 ## Project Structure
 ```

@@ -1,7 +1,8 @@
 import os
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException, Depends, Query, Request 
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -26,6 +27,10 @@ from functools import lru_cache
 from typing import Dict, Optional
 import hashlib
 import logging
+from urllib.parse import quote_plus 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -254,6 +259,30 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 app = FastAPI()
 
+# ============= RATE LIMITING SETUP =============
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+# Custom error handler for rate limit exceeded
+@app.exception_handler(RateLimitExceeded)
+async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """
+    Returns user-friendly error message when rate limit is exceeded
+    Status code 429 = Too Many Requests
+    """
+    return JSONResponse(
+        status_code=429,
+        content={
+            "success": False,
+            "error": "Rate Limit Exceeded",
+            "message": "Too many requests. Please slow down and try again later.",
+            "detail": str(exc.detail),
+            "retry_after": 60
+        },
+        headers={
+            "Retry-After": "60" 
+        }
+    )
+
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
@@ -273,6 +302,17 @@ app.add_middleware(
 async def startup_event():
     """Validate environment on startup"""
     validate_environment()
+    
+    # ✅ Verify slowapi is working
+    try:
+        import slowapi
+        version = getattr(slowapi, '__version__', 'unknown')
+        logger.info(f"✅ Rate limiting enabled (slowapi v{version})")
+    except ImportError:
+        logger.warning("⚠️ slowapi not installed - rate limiting will not work!")
+    except Exception as e:
+        logger.warning(f"⚠️ Rate limiting may not be working: {e}")
+    
     logger.info("🚀 Application started successfully")
 
 @app.on_event("shutdown")
@@ -825,34 +865,44 @@ def get_response(question, db, chat_history, db_uri, cached_schema):
 # ==================== API ENDPOINTS ====================
 
 @app.post("/api/send-otp")
-async def send_otp_for_signup(request: OtpRequest, db: Session = Depends(get_db)):
-    """Send OTP - Now stored in database"""
+@limiter.limit("3/minute")  
+async def send_otp_for_signup(
+    request: Request,  
+    otp_request: OtpRequest,  
+    db: Session = Depends(get_db)
+):
+    """Send OTP - Now stored in database (Rate limited: 3 requests per minute)"""
     otp = generate_otp()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
     
-    db.query(OTP).filter(OTP.email == request.email).delete()
+    db.query(OTP).filter(OTP.email == otp_request.email).delete()
     
     db_otp = OTP(
-        email=request.email,
+        email=otp_request.email,  
         otp=otp,
         expires_at=expires_at
     )
     db.add(db_otp)
     db.commit()
     
-    email_sent = send_otp_email(request.email, otp)
+    email_sent = send_otp_email(otp_request.email, otp)  
     
     if email_sent:
         message = "OTP has been sent to your email."
     else:
         message = "Email unavailable; check server logs for OTP."
     
-    print(f"[OTP] Generated OTP for {request.email}: {otp}")
+    print(f"[OTP] Generated OTP for {otp_request.email}: {otp}")  
     return {"success": True, "message": message}
 
 @app.post("/api/signup", status_code=201)
-async def signup_user(user: UserCreate, db: Session = Depends(get_db)):
-    """Register new user - OTP verified from database"""
+@limiter.limit("5/hour")  
+async def signup_user(
+    request: Request,  
+    user: UserCreate, 
+    db: Session = Depends(get_db)
+):
+    """Register new user - OTP verified from database (Rate limited: 5 signups per hour)"""
     stored_otp = db.query(OTP).filter(OTP.email == user.email).first()
     
     if not stored_otp:
@@ -900,8 +950,13 @@ async def signup_user(user: UserCreate, db: Session = Depends(get_db)):
     return {"success": True, "message": "User created successfully"}
 
 @app.post("/api/login")
-async def login_for_access_token(form_data: UserLogin, db: Session = Depends(get_db)):
-    """Login with email or username"""
+@limiter.limit("10/minute")  
+async def login_for_access_token(
+    request: Request,  
+    form_data: UserLogin, 
+    db: Session = Depends(get_db)
+):
+    """Login with email or username (Rate limited: 10 attempts per minute)"""
     user = get_user(form_data.identifier, db)
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect email/username or password")
@@ -921,18 +976,22 @@ async def login_for_access_token(form_data: UserLogin, db: Session = Depends(get
     }
 
 @app.post("/api/list-databases")
-async def list_databases(creds: DBCredentials):
-    """Step 1: Verify credentials and return list of available databases"""
+@limiter.limit("20/minute") 
+async def list_databases(
+    request: Request, 
+    creds: DBCredentials
+):
+    """Step 1: Verify credentials and return list of available databases (Rate limited: 20 requests per minute)"""
     print(f"[LIST DB] Received request: host={creds.host}, port={creds.port}, user={creds.user}")
     
     try:
         # Connect to MySQL server without specifying database
-        db_uri = f"mysql+mysqlconnector://{creds.user}:{creds.password}@{creds.host}:{creds.port}"
+        db_uri = f"mysql+mysqlconnector://{creds.user}:{quote_plus(creds.password)}@{creds.host}:{creds.port}"
         
         # Create temporary engine
         temp_engine = create_engine(
             db_uri,
-            poolclass=pool.NullPool,  # Don't pool this connection
+            poolclass=pool.NullPool,  
             echo=False
         )
         
@@ -1003,8 +1062,12 @@ async def list_databases(creds: DBCredentials):
         )
 
 @app.post("/api/create-database")
-async def create_database(config: DBCreate):
-    """Create a new database on the MySQL server"""
+@limiter.limit("10/hour") 
+async def create_database(
+    request: Request,  
+    config: DBCreate
+):
+    """Create a new database on the MySQL server (Rate limited: 10 creations per hour)"""
     print(f"[CREATE DB] Request to create database: {config.database_name}")
     
     try:
@@ -1033,7 +1096,7 @@ async def create_database(config: DBCreate):
             )
         
         # Connect to MySQL server without specifying database
-        db_uri = f"mysql+mysqlconnector://{config.user}:{config.password}@{config.host}:{config.port}"
+        db_uri = f"mysql+mysqlconnector://{config.user}:{quote_plus(config.password)}@{config.host}:{config.port}"
         
         # Create temporary engine
         temp_engine = create_engine(
@@ -1115,12 +1178,16 @@ async def create_database(config: DBCreate):
         )
     
 @app.post("/api/connect")
-async def connect_db(config: DBSelection):
-    """Connect to MySQL database with connection pooling"""
+@limiter.limit("20/minute") 
+async def connect_db(
+    request: Request,  
+    config: DBSelection
+):
+    """Connect to MySQL database with connection pooling (Rate limited: 20 requests per minute)"""
     print(f"Received connect request: host={config.host}, port={config.port}, user={config.user}, database={config.database}")
     
     try:
-        db_uri = f"mysql+mysqlconnector://{config.user}:{config.password}@{config.host}:{config.port}/{config.database}"
+        db_uri = f"mysql+mysqlconnector://{config.user}:{quote_plus(config.password)}@{config.host}:{config.port}/{config.database}"
         
         # ✅ Use connection pool manager
         test_engine = db_pool_manager.get_engine(db_uri)
@@ -1263,15 +1330,19 @@ async def disconnect_db():
     return {"success": False, "message": "No database connection to disconnect"}
 
 @app.post("/api/chat")
-async def chat_endpoint(request: ChatRequest):
-    """✅ OPTIMIZED Chat endpoint with connection pooling and caching"""
+@limiter.limit("30/minute")  
+async def chat_endpoint(
+    request: Request, 
+    chat_request: ChatRequest
+):
+    """✅ OPTIMIZED Chat endpoint with connection pooling and caching (Rate limited: 30 queries per minute)"""
     if not hasattr(app.state, "db_uri"):
         raise HTTPException(status_code=400, detail="Database not connected")
     
     chat_history = [
         AIMessage(content=msg["content"]) if msg["role"] == "ai"
         else HumanMessage(content=msg["content"])
-        for msg in request.chat_history
+        for msg in chat_request.chat_history  
     ]
     
     try:
@@ -1283,7 +1354,7 @@ async def chat_endpoint(request: ChatRequest):
         
         # ✅ Get response with caching
         response = get_response(
-            request.question, 
+            chat_request.question, 
             db, 
             chat_history, 
             app.state.db_uri,
@@ -1297,9 +1368,14 @@ async def chat_endpoint(request: ChatRequest):
         print(f"Chat error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
+
 @app.get("/api/chat-sessions")
-async def get_chat_sessions(user_id: int = Query(...)):
-    """Get all chat sessions for a specific user"""
+@limiter.limit("60/minute") 
+async def get_chat_sessions(
+    request: Request, 
+    user_id: int = Query(...)
+):
+    """Get all chat sessions for a specific user (Rate limited: 60 requests per minute)"""
     db_session = SessionLocal()
     try:
         sessions = db_session.query(ChatSession).filter(
@@ -1325,8 +1401,12 @@ async def get_chat_sessions(user_id: int = Query(...)):
         db_session.close()
 
 @app.post("/api/chat-sessions")
-async def create_chat_session(session: dict):
-    """Create a new chat session for a user"""
+@limiter.limit("30/minute")  
+async def create_chat_session(
+    request: Request, 
+    session: dict
+):
+    """Create a new chat session for a user (Rate limited: 30 creations per minute)"""
     db_session = SessionLocal()
     try:
         if not session.get("user_id"):
@@ -1360,8 +1440,13 @@ async def create_chat_session(session: dict):
         db_session.close()
 
 @app.put("/api/chat-sessions/{session_id}")
-async def update_chat_session(session_id: int, session: dict):
-    """Update a chat session (with user verification)"""
+@limiter.limit("60/minute")  
+async def update_chat_session(
+    request: Request, 
+    session_id: int, 
+    session: dict
+):
+    """Update a chat session (with user verification) (Rate limited: 60 updates per minute)"""
     db_session = SessionLocal()
     try:
         existing_session = db_session.query(ChatSession).filter(
@@ -1398,8 +1483,13 @@ async def update_chat_session(session_id: int, session: dict):
         db_session.close()
 
 @app.delete("/api/chat-sessions/{session_id}")
-async def delete_chat_session(session_id: int, user_id: int = Query(...)):
-    """Delete a chat session (with user verification)"""
+@limiter.limit("30/minute") 
+async def delete_chat_session(
+    request: Request, 
+    session_id: int, 
+    user_id: int = Query(...)
+):
+    """Delete a chat session (with user verification) (Rate limited: 30 deletions per minute)"""
     db_session = SessionLocal()
     try:
         session = db_session.query(ChatSession).filter(
@@ -1430,10 +1520,15 @@ async def delete_chat_session(session_id: int, user_id: int = Query(...)):
         db_session.close()
 
 @app.post("/api/forgot-password")
-async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    """Send OTP for password reset"""
+@limiter.limit("3/minute")  
+async def forgot_password(
+    request: Request,  
+    forgot_request: ForgotPasswordRequest,  
+    db: Session = Depends(get_db)
+):
+    """Send OTP for password reset (Rate limited: 3 requests per minute)"""
     try:
-        user = db.query(User).filter(User.email == request.email).first()
+        user = db.query(User).filter(User.email == forgot_request.email).first() 
         if not user:
             return {
                 "success": True,
@@ -1443,24 +1538,24 @@ async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(
         otp = generate_otp()
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
         
-        db.query(PasswordResetOTP).filter(PasswordResetOTP.email == request.email).delete()
+        db.query(PasswordResetOTP).filter(PasswordResetOTP.email == forgot_request.email).delete()  
         
         db_otp = PasswordResetOTP(
-            email=request.email,
+            email=forgot_request.email, 
             otp=otp,
             expires_at=expires_at
         )
         db.add(db_otp)
         db.commit()
         
-        email_sent = send_password_reset_email(request.email, otp)
+        email_sent = send_password_reset_email(forgot_request.email, otp) 
         
         if email_sent:
             message = "Password reset code has been sent to your email."
         else:
             message = "Email unavailable; check server logs for reset code."
         
-        print(f"[PASSWORD RESET] Generated OTP for {request.email}: {otp}")
+        print(f"[PASSWORD RESET] Generated OTP for {forgot_request.email}: {otp}")  
         
         return {
             "success": True,
@@ -1475,11 +1570,16 @@ async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(
         )
 
 @app.post("/api/verify-reset-otp")
-async def verify_reset_otp(request: dict, db: Session = Depends(get_db)):
-    """Verify OTP for password reset"""
+@limiter.limit("5/minute")  
+async def verify_reset_otp(
+    request: Request,  
+    verify_request: dict, 
+    db: Session = Depends(get_db)
+):
+    """Verify OTP for password reset (Rate limited: 5 attempts per minute)"""
     try:
-        email = request.get("email")
-        otp = request.get("otp")
+        email = verify_request.get("email")  
+        otp = verify_request.get("otp")  
         
         if not email or not otp:
             raise HTTPException(status_code=400, detail="Email and OTP are required")
@@ -1521,13 +1621,17 @@ async def verify_reset_otp(request: dict, db: Session = Depends(get_db)):
             status_code=500,
             detail="Failed to verify reset code. Please try again."
         )
-
 @app.post("/api/reset-password")
-async def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
-    """Reset password with OTP verification"""
+@limiter.limit("5/minute") 
+async def reset_password(
+    request: Request, 
+    reset_request: ResetPasswordRequest,  
+    db: Session = Depends(get_db)
+):
+    """Reset password with OTP verification (Rate limited: 5 attempts per minute)"""
     try:
         stored_otp = db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == request.email
+            PasswordResetOTP.email == reset_request.email 
         ).first()
         
         if not stored_otp:
@@ -1547,26 +1651,26 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
                 detail="Reset code has expired."
             )
         
-        if stored_otp.otp != request.otp:
+        if stored_otp.otp != reset_request.otp: 
             raise HTTPException(status_code=400, detail="Invalid reset code.")
         
-        user = db.query(User).filter(User.email == request.email).first()
+        user = db.query(User).filter(User.email == reset_request.email).first()  # ✅ CHANGE
         if not user:
             raise HTTPException(status_code=404, detail="User not found.")
         
-        if len(request.new_password) < 8:
+        if len(reset_request.new_password) < 8: 
             raise HTTPException(
                 status_code=400,
                 detail="Password must be at least 8 characters long."
             )
         
-        user.hashed_password = get_password_hash(request.new_password)
+        user.hashed_password = get_password_hash(reset_request.new_password)  # ✅ CHANGE
         
         db.delete(stored_otp)
         
         db.commit()
         
-        print(f"[PASSWORD RESET] Password reset successful for {request.email}")
+        print(f"[PASSWORD RESET] Password reset successful for {reset_request.email}")  # ✅ CHANGE
         
         return {
             "success": True,
@@ -1583,11 +1687,17 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
             detail="Failed to reset password. Please try again."
         )
 
+
 @app.post("/api/resend-reset-otp")
-async def resend_reset_otp(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    """Resend OTP for password reset"""
+@limiter.limit("3/minute")  
+async def resend_reset_otp(
+    request: Request, 
+    resend_request: ForgotPasswordRequest,  
+    db: Session = Depends(get_db)
+):
+    """Resend OTP for password reset (Rate limited: 3 requests per minute)"""
     try:
-        user = db.query(User).filter(User.email == request.email).first()
+        user = db.query(User).filter(User.email == resend_request.email).first()  
         if not user:
             return {
                 "success": True,
@@ -1595,7 +1705,7 @@ async def resend_reset_otp(request: ForgotPasswordRequest, db: Session = Depends
             }
         
         existing_otp = db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == request.email
+            PasswordResetOTP.email == resend_request.email  
         ).first()
         
         if existing_otp:
@@ -1613,20 +1723,20 @@ async def resend_reset_otp(request: ForgotPasswordRequest, db: Session = Depends
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
         
         db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == request.email
+            PasswordResetOTP.email == resend_request.email  
         ).delete()
         
         db_otp = PasswordResetOTP(
-            email=request.email,
+            email=resend_request.email,  
             otp=otp,
             expires_at=expires_at
         )
         db.add(db_otp)
         db.commit()
         
-        email_sent = send_password_reset_email(request.email, otp)
+        email_sent = send_password_reset_email(resend_request.email, otp) 
         
-        print(f"[RESEND OTP] New OTP for {request.email}: {otp}")
+        print(f"[RESEND OTP] New OTP for {resend_request.email}: {otp}") 
         
         return {
             "success": True,
@@ -1641,8 +1751,12 @@ async def resend_reset_otp(request: ForgotPasswordRequest, db: Session = Depends
         )
     
 @app.post("/api/confirm-sql")
-async def confirm_sql_action(req: ConfirmSQLRequest):
-    """Confirm and execute dangerous SQL"""
+@limiter.limit("20/minute") 
+async def confirm_sql_action(
+    request: Request, 
+    req: ConfirmSQLRequest
+):
+    """Confirm and execute dangerous SQL (Rate limited: 20 confirmations per minute)"""
     if not req.confirm:
         return {
             "type": "status",
@@ -1652,12 +1766,10 @@ async def confirm_sql_action(req: ConfirmSQLRequest):
     try:
         if not hasattr(app.state, "db_uri"):
             raise HTTPException(status_code=400, detail="Database not connected")
-        
-        # ✅ Use pooled connection
+
         db = db_pool_manager.get_db(app.state.db_uri)
         result = db.run(req.sql)
         
-        # ✅ Invalidate caches after data modification
         schema_cache.invalidate(app.state.db_uri)
         query_cache.clear()
         
