@@ -243,6 +243,15 @@ class OTP(Base):
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+class ProfileUpdateOTP(Base):
+    """OTP for email change verification"""
+    __tablename__ = "profile_update_otps"
+    user_id = Column(Integer, primary_key=True, index=True)
+    otp = Column(String, nullable=False)
+    new_email = Column(String, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 class PasswordResetOTP(Base):
     """New table for password reset OTPs"""
     __tablename__ = "password_reset_otps"
@@ -410,6 +419,29 @@ class ConfirmSQLRequest(BaseModel):
     confirm: bool
     sql: str
 
+class UpdateProfileRequest(BaseModel):
+    userId: int
+    firstName: str
+    lastName: str
+    username: str
+    email: EmailStr
+    phone: str
+    gender: str
+
+class ChangePasswordRequest(BaseModel):
+    userId: int
+    currentPassword: str
+    newPassword: str
+
+class SendEmailOTPRequest(BaseModel):
+    userId: int
+    newEmail: EmailStr
+
+class UpdateEmailRequest(BaseModel):
+    userId: int
+    newEmail: EmailStr
+    otp: str
+
 # Database Session Dependency
 def get_db():
     db = SessionLocal()
@@ -510,6 +542,61 @@ def send_password_reset_email(recipient_email: str, otp: str) -> bool:
         print(f"[PASSWORD RESET] Failed for {recipient_email}: {e}")
         return False
 
+def send_email_change_otp(recipient_email: str, otp: str, user_name: str) -> bool:
+    """Send OTP to verify new email address"""
+    if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
+        print(f"[EMAIL CHANGE] Missing credentials; OTP for {recipient_email}: {otp}")
+        return False
+    
+    message = MIMEMultipart("alternative")
+    message["Subject"] = "Verify Your New Email - Query Genie"
+    message["From"] = EMAIL_HOST_USER
+    message["To"] = recipient_email
+    
+    html = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
+        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <div style="background: linear-gradient(135deg, #667eea, #764ba2); padding: 30px; text-align: center;">
+                <h1 style="color: white; margin: 0;">Verify New Email</h1>
+            </div>
+            
+            <div style="padding: 30px;">
+                <p style="color: #333; margin-bottom: 10px;">Hi <strong>{user_name}</strong>,</p>
+                
+                <p style="color: #666; margin-bottom: 20px;">
+                    You're changing your email address. Use this code to verify:
+                </p>
+                
+                <div style="text-align: center; margin: 25px 0;">
+                    <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; border: 2px dashed #667eea;">
+                        <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #667eea;">
+                            {otp}
+                        </span>
+                    </div>
+                </div>
+                
+                <p style="color: #666; font-size: 14px;">
+                    <strong>Expires in 5 minutes.</strong> If you didn't request this, ignore this email.
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    message.attach(MIMEText(html, "html"))
+    
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
+            server.sendmail(EMAIL_HOST_USER, recipient_email, message.as_string())
+        print(f"[EMAIL CHANGE] OTP sent to {recipient_email}")
+        return True
+    except Exception as e:
+        print(f"[EMAIL CHANGE] Failed for {recipient_email}: {e}")
+        return False
+    
 # SQL Safety
 DANGEROUS_KEYWORDS = ["DROP", "TRUNCATE", "DELETE", "ALTER", "UPDATE"]
 FORBIDDEN_PATTERNS = [
@@ -1748,6 +1835,255 @@ async def resend_reset_otp(
         raise HTTPException(
             status_code=500,
             detail="Failed to resend reset code. Please try again."
+        )
+
+@app.post("/api/send-email-change-otp")
+@limiter.limit("3/minute")
+async def send_email_change_otp_endpoint(
+    request: Request,
+    otp_request: SendEmailOTPRequest,
+    db: Session = Depends(get_db)
+):
+    """Send OTP to verify email change"""
+    try:
+        user = db.query(User).filter(User.id == otp_request.userId).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if new email already exists
+        existing = db.query(User).filter(
+            User.email == otp_request.newEmail,
+            User.id != otp_request.userId
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Email already in use")
+        
+        # Generate and store OTP
+        otp = generate_otp()
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        
+        # Delete old OTP if exists
+        db.query(ProfileUpdateOTP).filter(ProfileUpdateOTP.user_id == otp_request.userId).delete()
+        
+        # Save new OTP
+        db_otp = ProfileUpdateOTP(
+            user_id=otp_request.userId,
+            otp=otp,
+            new_email=otp_request.newEmail,
+            expires_at=expires_at
+        )
+        db.add(db_otp)
+        db.commit()
+        
+        # Send email
+        user_name = f"{user.firstName} {user.lastName}"
+        send_email_change_otp(otp_request.newEmail, otp, user_name)
+        
+        print(f"[EMAIL CHANGE OTP] Generated for user {user.id}: {otp}")
+        return {"success": True, "message": f"OTP sent to {otp_request.newEmail}"}
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[EMAIL CHANGE OTP ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to send OTP")
+
+@app.put("/api/update-email")
+@limiter.limit("10/minute")
+async def update_email_with_otp(
+    request: Request,
+    email_request: UpdateEmailRequest,
+    db: Session = Depends(get_db)
+):
+    """Update email after OTP verification"""
+    try:
+        user = db.query(User).filter(User.id == email_request.userId).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get OTP record
+        otp_record = db.query(ProfileUpdateOTP).filter(
+            ProfileUpdateOTP.user_id == email_request.userId
+        ).first()
+        
+        if not otp_record:
+            raise HTTPException(status_code=400, detail="OTP not found or expired")
+        
+        # Check expiration
+        now = datetime.now(timezone.utc)
+        expires_at = make_tz_aware(otp_record.expires_at)
+        if now > expires_at:
+            db.delete(otp_record)
+            db.commit()
+            raise HTTPException(status_code=400, detail="OTP expired")
+        
+        # Verify OTP
+        if otp_record.otp != email_request.otp:
+            raise HTTPException(status_code=400, detail="Invalid OTP")
+        
+        # Verify email matches
+        if otp_record.new_email != email_request.newEmail:
+            raise HTTPException(status_code=400, detail="Email mismatch")
+        
+        # Update email
+        user.email = email_request.newEmail
+        db.delete(otp_record)
+        db.commit()
+        db.refresh(user)
+        
+        print(f"[EMAIL UPDATE] Email updated for user {user.id}")
+        
+        return {
+            "success": True,
+            "message": "Email updated successfully",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "firstName": user.firstName,
+                "lastName": user.lastName,
+                "username": user.username,
+                "phone": user.phone,
+                "gender": user.gender
+            }
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db.rollback()
+        print(f"[EMAIL UPDATE ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update email")
+    
+
+@app.put("/api/update-profile")
+@limiter.limit("10/minute")
+async def update_profile(
+    request: Request,
+    profile_request: UpdateProfileRequest,
+    db: Session = Depends(get_db)
+):
+    """Update user profile (Rate limited: 10 updates per minute)"""
+    try:
+        # Get the user
+        user = db.query(User).filter(User.id == profile_request.userId).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if email is being changed and if it's already taken
+        if profile_request.email != user.email:
+            existing_email = db.query(User).filter(
+                User.email == profile_request.email,
+                User.id != profile_request.userId
+            ).first()
+            if existing_email:
+                raise HTTPException(status_code=400, detail="Email already in use")
+        
+        # Check if username is being changed and if it's already taken
+        if profile_request.username != user.username:
+            existing_username = db.query(User).filter(
+                User.username == profile_request.username,
+                User.id != profile_request.userId
+            ).first()
+            if existing_username:
+                raise HTTPException(status_code=400, detail="Username already taken")
+        
+        # Check if phone is being changed and if it's already taken
+        if profile_request.phone != user.phone:
+            existing_phone = db.query(User).filter(
+                User.phone == profile_request.phone,
+                User.id != profile_request.userId
+            ).first()
+            if existing_phone:
+                raise HTTPException(status_code=400, detail="Phone number already registered")
+        
+        # Update user fields
+        user.firstName = profile_request.firstName
+        user.lastName = profile_request.lastName
+        user.username = profile_request.username
+        user.email = profile_request.email
+        user.phone = profile_request.phone
+        user.gender = profile_request.gender
+        
+        db.commit()
+        db.refresh(user)
+        
+        print(f"[UPDATE PROFILE] Profile updated for user {user.id}")
+        
+        return {
+            "success": True,
+            "message": "Profile updated successfully",
+            "user": {
+                "id": user.id,
+                "firstName": user.firstName,
+                "lastName": user.lastName,
+                "username": user.username,
+                "email": user.email,
+                "phone": user.phone,
+                "gender": user.gender
+            }
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db.rollback()
+        print(f"[UPDATE PROFILE ERROR] {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update profile. Please try again."
+        )
+@app.post("/api/change-password")
+@limiter.limit("5/minute")
+async def change_password(
+    request: Request,
+    password_request: ChangePasswordRequest,
+    db: Session = Depends(get_db)
+):
+    """Change user password (Rate limited: 5 attempts per minute)"""
+    try:
+        # Get the user
+        user = db.query(User).filter(User.id == password_request.userId).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Verify current password
+        if not verify_password(password_request.currentPassword, user.hashed_password):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+        
+        # Validate new password length
+        if len(password_request.newPassword) < 8:
+            raise HTTPException(
+                status_code=400,
+                detail="New password must be at least 8 characters long"
+            )
+        
+        # Check if new password is different from current
+        if verify_password(password_request.newPassword, user.hashed_password):
+            raise HTTPException(
+                status_code=400,
+                detail="New password must be different from current password"
+            )
+        
+        # Update password
+        user.hashed_password = get_password_hash(password_request.newPassword)
+        
+        db.commit()
+        
+        print(f"[CHANGE PASSWORD] Password changed successfully for user {user.id}")
+        
+        return {
+            "success": True,
+            "message": "Password changed successfully"
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db.rollback()
+        print(f"[CHANGE PASSWORD ERROR] {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to change password. Please try again."
         )
     
 @app.post("/api/confirm-sql")

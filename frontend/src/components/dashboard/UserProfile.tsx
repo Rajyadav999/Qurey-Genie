@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
@@ -17,6 +18,7 @@ import { User, LogOut, Settings, Moon, Sun } from 'lucide-react';
 const UserProfile = () => {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const navigate = useNavigate();
   const [showDetails, setShowDetails] = useState(false);
 
   if (!user) return null;
@@ -34,6 +36,11 @@ const UserProfile = () => {
   const handleLogout = () => {
     console.log('[USER_PROFILE] Logout initiated');
     logout(); // This will clear localStorage and navigate to home
+  };
+
+  // ✅ Navigate to Settings page
+  const handleSettingsClick = () => {
+    navigate('/settings');
   };
 
   return (
@@ -81,7 +88,7 @@ const UserProfile = () => {
             )}
           </DropdownMenuItem>
           
-          <DropdownMenuItem>
+          <DropdownMenuItem onClick={handleSettingsClick}>
             <Settings className="mr-2 h-4 w-4" />
             Settings
           </DropdownMenuItem>

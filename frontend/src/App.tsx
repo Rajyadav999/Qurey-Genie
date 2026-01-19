@@ -8,6 +8,7 @@ import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import AuthPage from "./pages/AuthPage";
 import DashboardPage from "./pages/DashboardPage";
+import SettingsPage from "./pages/SettingsPage";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -80,6 +81,15 @@ const AppRoutes = () => (
       element={
         <ProtectedRoute>
           <DashboardPage />
+        </ProtectedRoute>
+      } 
+    />
+    
+    <Route 
+      path="/settings" 
+      element={
+        <ProtectedRoute>
+          <SettingsPage />
         </ProtectedRoute>
       } 
     />

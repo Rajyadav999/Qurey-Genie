@@ -24,11 +24,21 @@ interface SignupData {
   otp: string;
 }
 
+interface ProfileUpdateData {
+  firstName: string;
+  lastName: string;
+  username: string;
+  email: string;
+  phone: string;
+  gender: string;
+}
+
 interface AuthContextType {
   user: User | null;
   logout: () => void;
   refreshUser: () => void;
   signup: (data: SignupData) => Promise<boolean>;
+  updateUserProfile: (data: ProfileUpdateData) => Promise<void>;
   isAuthenticated: boolean;
   isLoading: boolean;
 }
@@ -118,6 +128,42 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     loadUserFromStorage();
   };
 
+  // Update user profile function
+  const updateUserProfile = async (data: ProfileUpdateData): Promise<void> => {
+    if (!user) {
+      throw new Error('No user logged in');
+    }
+
+    try {
+      console.log('[AUTH] Updating user profile:', data.username);
+      
+      // Create updated user object
+      const updatedUser: User = {
+        ...user,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        username: data.username,
+        email: data.email,
+        phone: data.phone,
+        gender: data.gender
+      };
+
+      // Save to localStorage
+      localStorage.setItem('query-genie-user', JSON.stringify(updatedUser));
+      
+      // Update state
+      setUser(updatedUser);
+      
+      // Dispatch custom event for other components
+      window.dispatchEvent(new CustomEvent('userProfileUpdated', { detail: updatedUser }));
+      
+      console.log('[AUTH] Profile updated successfully in localStorage');
+    } catch (error) {
+      console.error('[AUTH] Profile update failed:', error);
+      throw error;
+    }
+  };
+
   // Signup function
   const signup = async (data: SignupData): Promise<boolean> => {
     setIsLoading(true);
@@ -184,6 +230,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     logout,
     refreshUser,
     signup,
+    updateUserProfile,
     isAuthenticated: !!user,
     isLoading
   };
