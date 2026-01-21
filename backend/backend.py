@@ -352,7 +352,115 @@ async def health_check():
             "connection_pools": len(db_pool_manager._pools)
         }
     }
+@app.get("/api/tables")
+@limiter.limit("30/minute")
+async def get_all_tables(request: Request):
+    """Get list of all tables in the connected database (Rate limited: 30 requests per minute)"""
+    if not hasattr(app.state, "db_uri"):
+        raise HTTPException(status_code=400, detail="Database not connected")
+    
+    try:
+        # Get pooled database connection
+        engine = db_pool_manager.get_engine(app.state.db_uri)
+        
+        # Use SQLAlchemy inspector to get table names
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        print(f"[GET TABLES] Retrieved {len(tables)} tables")
+        
+        return {
+            "success": True,
+            "tables": tables,
+            "count": len(tables),
+            "database": app.state.db_name if hasattr(app.state, 'db_name') else 'unknown'
+        }
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[GET TABLES ERROR] {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve tables: {error_msg}"
+        )
 
+
+@app.get("/api/table-schema/{table_name}")
+@limiter.limit("30/minute")
+async def get_table_schema(
+    request: Request,
+    table_name: str
+):
+    """Get schema for a specific table (Rate limited: 30 requests per minute)"""
+    if not hasattr(app.state, "db_uri"):
+        raise HTTPException(status_code=400, detail="Database not connected")
+    
+    try:
+        engine = db_pool_manager.get_engine(app.state.db_uri)
+        inspector = inspect(engine)
+        if table_name not in inspector.get_table_names():
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Table '{table_name}' not found"
+            )
+        columns = inspector.get_columns(table_name)
+
+        # Get Primary key  constraints
+        pk_constraint = inspector.get_pk_constraint(table_name)
+        primary_keys = pk_constraint.get('constrained_columns', []) if pk_constraint else []
+
+        fk_constraints = inspector.get_foreign_keys(table_name)
+        foreign_keys = []
+        for fk in fk_constraints:
+            foreign_keys.extend(fk.get('constrained_columns', []))
+        
+        # Get unique constraints
+        unique_constraints = inspector.get_unique_constraints(table_name)
+        unique_columns = []
+        for uc in unique_constraints:
+            unique_columns.extend(uc.get('column_names', []))
+        
+        schema_info = []
+        for col in columns:
+            col_name = col['name']
+            
+            # Determine key type
+            key = None
+            if col_name in primary_keys:
+                key = 'PRI'
+            elif col_name in foreign_keys:
+                key = 'MUL'
+            elif col_name in unique_columns:
+                key = 'UNI'
+            
+            schema_info.append({
+                'name': col_name,
+                'type': str(col['type']),
+                'nullable': col.get('nullable', True),
+                'key': key,
+                'default': str(col['default']) if col.get('default') is not None else None,
+                'autoincrement': col.get('autoincrement', False)
+            })
+        
+        print(f"[GET SCHEMA] Retrieved schema for table '{table_name}': {len(schema_info)} columns")
+        
+        return {
+            "success": True,
+            "table_name": table_name,
+            "columns": schema_info,
+            "column_count": len(schema_info)
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[GET SCHEMA ERROR] Failed to get schema for '{table_name}': {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve table schema: {error_msg}"
+        )
+    
 # Pydantic Models
 class DBConfig(BaseModel):
     host: str
