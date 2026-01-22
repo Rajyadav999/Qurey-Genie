@@ -59,7 +59,21 @@ const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
       setLoadingSchemas(new Set());
     }
   }, [isConnected, databaseName]);
-
+// Event-based refresh - only refresh when explicitly triggered
+useEffect(() => {
+  if (!isConnected) return;
+  
+  const handleRefresh = () => {
+    fetchTables();
+  };
+  
+  // Listen for custom refresh event
+  window.addEventListener('refreshDatabaseSchema', handleRefresh);
+  
+  return () => {
+    window.removeEventListener('refreshDatabaseSchema', handleRefresh);
+  };
+}, [isConnected]);
   const fetchTables = async () => {
     setIsLoadingTables(true);
     setError(null);

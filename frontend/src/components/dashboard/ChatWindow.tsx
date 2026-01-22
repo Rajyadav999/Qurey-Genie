@@ -144,6 +144,37 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   }, [editingMessageId]);
 
+  // 🔥 NEW: Trigger database refresh when DDL operations complete
+  useEffect(() => {
+    // Track which messages we've already processed to avoid duplicate refreshes
+    const processedMessages = new Set<string>();
+    
+    messages.forEach(message => {
+      // Skip if we've already processed this message
+      if (processedMessages.has(message.id)) return;
+      
+      const effectiveType = message.role === 'ai' ? 'assistant' : message.type;
+      
+      if (effectiveType === 'assistant') {
+        const { sql, output } = parseBackendResponse(message.content);
+        
+        // Check if this is a DDL operation (CREATE, DROP, ALTER, TRUNCATE)
+        if (sql && output?.type === 'status') {
+          const isDDL = /^\s*(CREATE|DROP|ALTER|TRUNCATE)\s+/i.test(sql);
+          if (isDDL) {
+            // Mark as processed
+            processedMessages.add(message.id);
+            
+            // Trigger schema refresh after a short delay
+            setTimeout(() => {
+              window.dispatchEvent(new Event('refreshDatabaseSchema'));
+            }, 500);
+          }
+        }
+      }
+    });
+  }, [messages]);
+
   const handleCopyMessage = async (messageId: string, content: string, isUser: boolean) => {
     try {
       let textToCopy = content;
