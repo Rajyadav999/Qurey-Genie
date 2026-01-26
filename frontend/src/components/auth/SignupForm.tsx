@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Eye, EyeOff, Loader2, Mail, UserPlus, Check, Sparkles } from 'lucide-react';
+import { Eye, EyeOff, Loader2, Mail, UserPlus, Check, Shield, AlertCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import axios from 'axios';
 
@@ -214,85 +214,87 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
   };
 
   return (
-    <div className="w-full max-w-md mx-auto">
-      {/* Decorative background elements */}
-      <div className="relative">
-        <div className="absolute -top-20 -left-20 w-40 h-40 bg-purple-200 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-pulse"></div>
-        <div className="absolute -bottom-20 -right-20 w-40 h-40 bg-indigo-200 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-pulse" style={{ animationDelay: '1s' }}></div>
+    <div className="w-full max-w-2xl mx-auto">
+      {/* Header Section */}
+      <div className="mb-10 text-center">
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mb-3">
+          Create your account
+        </h1>
+        <p className="text-base text-slate-600 dark:text-slate-400 font-normal">
+          Join us today and get started in minutes
+        </p>
       </div>
 
-      {/* Main card */}
-      <div className="relative bg-white/90 backdrop-blur-lg rounded-3xl shadow-2xl border border-gray-100 p-8">
-        {/* Header */}
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 rounded-2xl mb-4 shadow-xl transform hover:scale-105 transition-transform">
-            <UserPlus className="w-8 h-8 text-white" />
-          </div>
-          <h2 className="text-3xl font-bold bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent mb-2">
-            Create Account
-          </h2>
-          <p className="text-gray-600">Join thousands using Query Genie</p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Name Fields */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="firstName" className="text-sm font-medium text-gray-700">
+      {/* Main Form Card */}
+      <div className="bg-white dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-slate-800 p-8 shadow-sm">
+        <form onSubmit={handleSubmit} className="space-y-6">
+          {/* Name Fields Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* First Name */}
+            <div className="space-y-2.5">
+              <Label 
+                htmlFor="firstName" 
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+              >
                 First Name
               </Label>
-              <div className="relative">
-                <Input
-                  id="firstName"
-                  type="text"
-                  value={formData.firstName}
-                  onChange={(e) => handleInputChange('firstName', e.target.value)}
-                  placeholder="John"
-                  className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
-                    errors.firstName 
-                      ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                      : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
-                  }`}
-                  disabled={isLoading}
-                />
-              </div>
+              <Input
+                id="firstName"
+                type="text"
+                value={formData.firstName}
+                onChange={(e) => handleInputChange('firstName', e.target.value)}
+                placeholder="John"
+                className={`h-11 px-4 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                  focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                  ${errors.firstName ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+                disabled={isLoading}
+              />
               {errors.firstName && (
-                <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                  <span>⚠️</span> {errors.firstName}
+                <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                  <AlertCircle size={14} strokeWidth={2.5} />
+                  {errors.firstName}
                 </p>
               )}
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="lastName" className="text-sm font-medium text-gray-700">
+            {/* Last Name */}
+            <div className="space-y-2.5">
+              <Label 
+                htmlFor="lastName" 
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+              >
                 Last Name
               </Label>
-              <div className="relative">
-                <Input
-                  id="lastName"
-                  type="text"
-                  value={formData.lastName}
-                  onChange={(e) => handleInputChange('lastName', e.target.value)}
-                  placeholder="Doe"
-                  className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
-                    errors.lastName 
-                      ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                      : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
-                  }`}
-                  disabled={isLoading}
-                />
-              </div>
+              <Input
+                id="lastName"
+                type="text"
+                value={formData.lastName}
+                onChange={(e) => handleInputChange('lastName', e.target.value)}
+                placeholder="Doe"
+                className={`h-11 px-4 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                  focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                  ${errors.lastName ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+                disabled={isLoading}
+              />
               {errors.lastName && (
-                <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                  <span>⚠️</span> {errors.lastName}
+                <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                  <AlertCircle size={14} strokeWidth={2.5} />
+                  {errors.lastName}
                 </p>
               )}
             </div>
           </div>
 
           {/* Username */}
-          <div className="space-y-2">
-            <Label htmlFor="username" className="text-sm font-medium text-gray-700">
+          <div className="space-y-2.5">
+            <Label 
+              htmlFor="username" 
+              className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+            >
               Username
             </Label>
             <Input
@@ -301,80 +303,94 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
               value={formData.username}
               onChange={(e) => handleInputChange('username', e.target.value)}
               placeholder="johndoe"
-              className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
-                errors.username 
-                  ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                  : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
-              }`}
+              className={`h-11 px-4 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                ${errors.username ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                disabled:opacity-50 disabled:cursor-not-allowed
+                placeholder:text-slate-400 dark:placeholder:text-slate-500`}
               disabled={isLoading}
             />
             {errors.username && (
-              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                <span>⚠️</span> {errors.username}
+              <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                <AlertCircle size={14} strokeWidth={2.5} />
+                {errors.username}
               </p>
             )}
           </div>
 
-          {/* Phone */}
-          <div className="space-y-2">
-            <Label htmlFor="phone" className="text-sm font-medium text-gray-700">
-              Phone Number
-            </Label>
-            <Input
-              id="phone"
-              type="tel"
-              value={formData.phone}
-              onChange={(e) => handleInputChange('phone', e.target.value)}
-              placeholder="+919876543210 or 9876543210"
-              className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
-                errors.phone 
-                  ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                  : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
-              }`}
-              disabled={isLoading}
-            />
-            <p className="text-xs text-gray-500">Format: +[country code][number]</p>
-            {errors.phone && (
-              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                <span>⚠️</span> {errors.phone}
-              </p>
-            )}
-          </div>
+          {/* Phone & Gender Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* Phone */}
+            <div className="space-y-2.5">
+              <Label 
+                htmlFor="phone" 
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+              >
+                Phone Number
+              </Label>
+              <Input
+                id="phone"
+                type="tel"
+                value={formData.phone}
+                onChange={(e) => handleInputChange('phone', e.target.value)}
+                placeholder="+919876543210"
+                className={`h-11 px-4 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                  focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                  ${errors.phone ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+                disabled={isLoading}
+              />
+              {errors.phone && (
+                <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                  <AlertCircle size={14} strokeWidth={2.5} />
+                  {errors.phone}
+                </p>
+              )}
+            </div>
 
-          {/* Gender */}
-          <div className="space-y-2">
-            <Label htmlFor="gender" className="text-sm font-medium text-gray-700">
-              Gender
-            </Label>
-            <Select
-              value={formData.gender}
-              onValueChange={(value) => handleInputChange('gender', value)}
-              disabled={isLoading}
-            >
-              <SelectTrigger className={`h-11 px-4 rounded-xl border-2 transition-all duration-200 ${
-                errors.gender 
-                  ? 'border-red-300 focus:border-red-500' 
-                  : 'border-gray-200 focus:border-indigo-500'
-              }`}>
-                <SelectValue placeholder="Select gender" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="Male">Male</SelectItem>
-                <SelectItem value="Female">Female</SelectItem>
-                <SelectItem value="Non-binary">Non-binary</SelectItem>
-                <SelectItem value="Prefer not to say">Prefer not to say</SelectItem>
-              </SelectContent>
-            </Select>
-            {errors.gender && (
-              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                <span>⚠️</span> {errors.gender}
-              </p>
-            )}
+            {/* Gender */}
+            <div className="space-y-2.5">
+              <Label 
+                htmlFor="gender" 
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+              >
+                Gender
+              </Label>
+              <Select
+                value={formData.gender}
+                onValueChange={(value) => handleInputChange('gender', value)}
+                disabled={isLoading}
+              >
+                <SelectTrigger 
+                  className={`h-11 px-4 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                    focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                    ${errors.gender ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}`}
+                >
+                  <SelectValue placeholder="Select gender" />
+                </SelectTrigger>
+                <SelectContent className="rounded-xl">
+                  <SelectItem value="Male" className="rounded-lg">Male</SelectItem>
+                  <SelectItem value="Female" className="rounded-lg">Female</SelectItem>
+                  <SelectItem value="Non-binary" className="rounded-lg">Non-binary</SelectItem>
+                  <SelectItem value="Prefer not to say" className="rounded-lg">Prefer not to say</SelectItem>
+                </SelectContent>
+              </Select>
+              {errors.gender && (
+                <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                  <AlertCircle size={14} strokeWidth={2.5} />
+                  {errors.gender}
+                </p>
+              )}
+            </div>
           </div>
 
           {/* Email with OTP */}
-          <div className="space-y-2">
-            <Label htmlFor="email" className="text-sm font-medium text-gray-700">
+          <div className="space-y-2.5">
+            <Label 
+              htmlFor="email" 
+              className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+            >
               Email Address
             </Label>
             <div className="relative">
@@ -384,175 +400,209 @@ const SignupForm = ({ onSwitchToLogin }: SignupFormProps) => {
                 value={formData.email}
                 onChange={(e) => handleInputChange('email', e.target.value)}
                 placeholder="john@example.com"
-                className={`h-11 px-4 pr-12 rounded-xl border-2 transition-all duration-200 ${
-                  otpSent ? 'bg-gray-50' : ''
-                } ${
-                  errors.email 
-                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                    : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
-                }`}
+                className={`h-11 px-4 pr-24 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                  focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                  ${otpSent ? 'bg-slate-50 dark:bg-slate-900/50' : ''}
+                  ${errors.email ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  placeholder:text-slate-400 dark:placeholder:text-slate-500`}
                 disabled={isLoading || otpSent}
               />
-              {!otpSent && (
+              {!otpSent ? (
                 <button
                   type="button"
                   onClick={handleSendOtp}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-indigo-600 hover:text-indigo-700 disabled:opacity-50 p-2 hover:bg-indigo-50 rounded-lg transition-all"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 px-3 flex items-center gap-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white disabled:opacity-50 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all duration-200"
                   disabled={isSendingOtp || isLoading || !!errors.email || !!errors.phone}
                 >
                   {isSendingOtp ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2.5} />
                   ) : (
-                    <Mail size={20} />
+                    <>
+                      <Mail size={16} strokeWidth={2.5} />
+                      <span>Send OTP</span>
+                    </>
                   )}
                 </button>
-              )}
-              {otpSent && (
-                <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1 text-green-600 bg-green-50 px-2 py-1 rounded-lg">
-                  <Check size={16} />
-                  <span className="text-xs font-medium">Sent</span>
+              ) : (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 px-3 py-1.5 rounded-lg border border-emerald-200 dark:border-emerald-800">
+                  <Check size={16} strokeWidth={2.5} />
+                  <span className="text-xs font-semibold">Verified</span>
                 </div>
               )}
             </div>
             {errors.email && (
-              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                <span>⚠️</span> {errors.email}
+              <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                <AlertCircle size={14} strokeWidth={2.5} />
+                {errors.email}
               </p>
             )}
           </div>
 
           {/* OTP Field */}
           {otpSent && (
-            <div className="space-y-2 animate-in slide-in-from-top-2">
-              <Label htmlFor="otp" className="text-sm font-medium text-gray-700 flex items-center gap-2">
+            <div className="space-y-2.5 animate-in slide-in-from-top-2">
+              <Label 
+                htmlFor="otp" 
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2"
+              >
+                <Shield size={16} className="text-slate-600 dark:text-slate-400" strokeWidth={2.5} />
                 Verification Code
-                <Sparkles className="w-4 h-4 text-indigo-500" />
               </Label>
               <Input
                 id="otp"
                 type="text"
+                inputMode="numeric"
                 value={formData.otp}
-                onChange={(e) => handleInputChange('otp', e.target.value)}
-                placeholder="• • • • • •"
+                onChange={(e) => handleInputChange('otp', e.target.value.replace(/\D/g, ''))}
+                placeholder="000000"
                 maxLength={6}
-                className={`h-12 px-4 rounded-xl border-2 text-center text-xl font-semibold tracking-[0.5em] transition-all duration-200 ${
-                  errors.otp 
-                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                    : 'border-indigo-300 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 bg-indigo-50/30'
-                }`}
+                className={`h-14 px-4 text-center text-2xl tracking-[0.5em] font-bold border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                  focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                  ${errors.otp ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  placeholder:text-slate-300 dark:placeholder:text-slate-600 placeholder:tracking-[0.5em]`}
                 disabled={isLoading}
+                autoFocus
               />
               {errors.otp && (
-                <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                  <span>⚠️</span> {errors.otp}
+                <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                  <AlertCircle size={14} strokeWidth={2.5} />
+                  {errors.otp}
                 </p>
               )}
             </div>
           )}
 
-          {/* Password */}
-          <div className="space-y-2">
-            <Label htmlFor="password" className="text-sm font-medium text-gray-700">
-              Password
-            </Label>
-            <div className="relative">
-              <Input
-                id="password"
-                type={showPassword ? 'text' : 'password'}
-                value={formData.password}
-                onChange={(e) => handleInputChange('password', e.target.value)}
-                placeholder="Enter password"
-                className={`h-11 px-4 pr-12 rounded-xl border-2 transition-all duration-200 ${
-                  errors.password 
-                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                    : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
-                }`}
-                disabled={isLoading}
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 hover:bg-gray-100 rounded transition-all"
-                disabled={isLoading}
+          {/* Password Fields Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* Password */}
+            <div className="space-y-2.5">
+              <Label 
+                htmlFor="password" 
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300"
               >
-                {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
-              </button>
+                Password
+              </Label>
+              <div className="relative">
+                <Input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={formData.password}
+                  onChange={(e) => handleInputChange('password', e.target.value)}
+                  placeholder="Enter password"
+                  className={`h-11 px-4 pr-12 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                    focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                    ${errors.password ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                    disabled:opacity-50 disabled:cursor-not-allowed
+                    placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+                  disabled={isLoading}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors duration-200 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                  disabled={isLoading}
+                  tabIndex={-1}
+                >
+                  {showPassword ? <EyeOff size={20} strokeWidth={2} /> : <Eye size={20} strokeWidth={2} />}
+                </button>
+              </div>
+              {errors.password && (
+                <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                  <AlertCircle size={14} strokeWidth={2.5} />
+                  {errors.password}
+                </p>
+              )}
             </div>
-            {errors.password && (
-              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                <span>⚠️</span> {errors.password}
-              </p>
-            )}
+
+            {/* Confirm Password */}
+            <div className="space-y-2.5">
+              <Label 
+                htmlFor="confirmPassword" 
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+              >
+                Confirm Password
+              </Label>
+              <div className="relative">
+                <Input
+                  id="confirmPassword"
+                  type={showConfirmPassword ? 'text' : 'password'}
+                  value={formData.confirmPassword}
+                  onChange={(e) => handleInputChange('confirmPassword', e.target.value)}
+                  placeholder="Confirm password"
+                  className={`h-11 px-4 pr-12 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                    focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                    ${errors.confirmPassword ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                    disabled:opacity-50 disabled:cursor-not-allowed
+                    placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+                  disabled={isLoading}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors duration-200 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                  disabled={isLoading}
+                  tabIndex={-1}
+                >
+                  {showConfirmPassword ? <EyeOff size={20} strokeWidth={2} /> : <Eye size={20} strokeWidth={2} />}
+                </button>
+              </div>
+              {errors.confirmPassword && (
+                <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                  <AlertCircle size={14} strokeWidth={2.5} />
+                  {errors.confirmPassword}
+                </p>
+              )}
+            </div>
           </div>
 
-          {/* Confirm Password */}
-          <div className="space-y-2">
-            <Label htmlFor="confirmPassword" className="text-sm font-medium text-gray-700">
-              Confirm Password
-            </Label>
-            <div className="relative">
-              <Input
-                id="confirmPassword"
-                type={showConfirmPassword ? 'text' : 'password'}
-                value={formData.confirmPassword}
-                onChange={(e) => handleInputChange('confirmPassword', e.target.value)}
-                placeholder="Confirm password"
-                className={`h-11 px-4 pr-12 rounded-xl border-2 transition-all duration-200 ${
-                  errors.confirmPassword 
-                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                    : 'border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100'
-                }`}
-                disabled={isLoading}
-              />
-              <button
-                type="button"
-                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 hover:bg-gray-100 rounded transition-all"
-                disabled={isLoading}
-              >
-                {showConfirmPassword ? <EyeOff size={20} /> : <Eye size={20} />}
-              </button>
-            </div>
-            {errors.confirmPassword && (
-              <p className="text-xs text-red-500 flex items-center gap-1 animate-in slide-in-from-top-1">
-                <span>⚠️</span> {errors.confirmPassword}
-              </p>
-            )}
+          {/* Password Requirements Info */}
+          <div className="bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
+            <p className="text-sm text-slate-600 dark:text-slate-400 font-medium">
+              Password must be at least 8 characters long
+            </p>
           </div>
 
           {/* Submit Button */}
           <Button 
             type="submit" 
-            className="w-full h-12 mt-6 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-700 hover:via-purple-700 hover:to-pink-700 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all duration-200 hover:scale-[1.02] active:scale-[0.98]"
+            className="w-full h-12 text-base font-semibold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-slate-200 text-white dark:text-slate-900 rounded-xl shadow-lg shadow-slate-900/10 dark:shadow-slate-100/10 transition-all duration-200 active:scale-[0.98] disabled:opacity-50"
             disabled={isLoading || !otpSent}
           >
             {isLoading ? (
               <>
-                <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                Creating Account...
+                <Loader2 className="w-5 h-5 mr-2 animate-spin" strokeWidth={2.5} />
+                <span>Creating Account...</span>
               </>
             ) : (
               <>
-                <UserPlus className="w-5 h-5 mr-2" />
-                Create Account
+                <UserPlus className="w-5 h-5 mr-2" strokeWidth={2.5} />
+                <span>Create Account</span>
               </>
             )}
           </Button>
 
           {/* Switch to Login */}
-          <div className="text-center pt-4">
-            <p className="text-sm text-gray-600">
-              Already have an account?{' '}
-              <button
-                type="button"
-                onClick={onSwitchToLogin}
-                className="text-indigo-600 hover:text-indigo-700 font-semibold transition-colors hover:underline"
-                disabled={isLoading}
-              >
-                Sign In
-              </button>
-            </p>
+          <div className="relative my-8">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-slate-200 dark:border-slate-700"></div>
+            </div>
+            <div className="relative flex justify-center text-sm">
+              <span className="px-4 bg-white dark:bg-slate-950 text-slate-500 dark:text-slate-400 font-medium">
+                Already have an account?
+              </span>
+            </div>
           </div>
+
+          <button
+            type="button"
+            onClick={onSwitchToLogin}
+            className="w-full h-12 text-base font-semibold border-2 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50 hover:border-slate-400 dark:hover:border-slate-500 rounded-xl transition-all duration-200 active:scale-[0.98]"
+            disabled={isLoading}
+          >
+            Sign In Instead
+          </button>
         </form>
       </div>
     </div>

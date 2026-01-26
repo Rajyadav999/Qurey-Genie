@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Eye, EyeOff, Loader2, LogIn, Mail, ArrowLeft, Clock, RefreshCw } from 'lucide-react';
+import { Eye, EyeOff, Loader2, LogIn, Mail, ArrowLeft, Clock, RefreshCw, Shield, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -105,7 +105,6 @@ const LoginForm = ({ onSwitchToSignup }: LoginFormProps) => {
       if (res.ok && data.success) {
         console.log('✅ [LOGIN] Login successful');
         
-        // Format user data to match AuthContext expectations
         const userData = {
           id: data.user.id.toString(),
           firstName: data.user.firstName,
@@ -116,11 +115,9 @@ const LoginForm = ({ onSwitchToSignup }: LoginFormProps) => {
           gender: data.user.gender
         };
         
-        // Store with the correct key that AuthContext expects
         localStorage.setItem('query-genie-user', JSON.stringify(userData));
         console.log('✅ [LOGIN] User saved to localStorage:', userData.username);
         
-        // 🔥 CRITICAL FIX: Dispatch custom event to notify AuthContext
         window.dispatchEvent(new CustomEvent('userLogin', { detail: userData }));
         console.log('✅ [LOGIN] userLogin event dispatched');
         
@@ -129,7 +126,6 @@ const LoginForm = ({ onSwitchToSignup }: LoginFormProps) => {
           description: "Login successful. Redirecting...",
         });
         
-        // Navigate to dashboard
         setTimeout(() => {
           console.log('🔄 [LOGIN] Navigating to /dashboard');
           navigate('/dashboard', { replace: true });
@@ -172,7 +168,7 @@ const LoginForm = ({ onSwitchToSignup }: LoginFormProps) => {
           description: data.message,
         });
         setView('otp');
-        setOtpTimer(600); // 10 minutes
+        setOtpTimer(600);
         setCanResend(false);
       } else {
         toast({
@@ -336,130 +332,210 @@ const LoginForm = ({ onSwitchToSignup }: LoginFormProps) => {
   // LOGIN VIEW
   if (view === 'login') {
     return (
-      <form onSubmit={handleLogin} className="space-y-5">
-        <div className="space-y-2">
-          <Label htmlFor="identifier">Username or Email</Label>
-          <Input
-            id="identifier"
-            type="text"
-            value={formData.identifier}
-            onChange={(e) => handleInputChange('identifier', e.target.value)}
-            placeholder="Enter username or email"
-            className={errors.identifier ? 'border-destructive' : ''}
-            disabled={isLoading}
-          />
-          {errors.identifier && <p className="text-xs text-destructive">{errors.identifier}</p>}
+      <div className="w-full max-w-md mx-auto">
+        <div className="mb-10 text-center">
+          <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mb-3">
+            Welcome back
+          </h1>
+          <p className="text-base text-slate-600 dark:text-slate-400 font-normal">
+            Sign in to continue to your account
+          </p>
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="password">Password</Label>
-            <button 
-              type="button"
-              onClick={() => setView('forgot')}
-              className="text-xs text-brand-600 hover:text-brand-700 font-medium"
-              disabled={isLoading}
+        <form onSubmit={handleLogin} className="space-y-6">
+          <div className="space-y-2.5">
+            <Label 
+              htmlFor="identifier" 
+              className="text-sm font-semibold text-slate-700 dark:text-slate-300"
             >
-              Forgot password?
-            </button>
-          </div>
-          <div className="relative">
+              Username or Email
+            </Label>
             <Input
-              id="password"
-              type={showPassword ? 'text' : 'password'}
-              value={formData.password}
-              onChange={(e) => handleInputChange('password', e.target.value)}
-              placeholder="Enter password"
-              className={errors.password ? 'border-destructive' : ''}
+              id="identifier"
+              type="text"
+              value={formData.identifier}
+              onChange={(e) => handleInputChange('identifier', e.target.value)}
+              placeholder="john@example.com"
+              className={`h-12 px-4 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200 
+                focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                ${errors.identifier ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                disabled:opacity-50 disabled:cursor-not-allowed
+                placeholder:text-slate-400 dark:placeholder:text-slate-500`}
               disabled={isLoading}
             />
-            <button
-              type="button"
-              onClick={() => setShowPassword(!showPassword)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              disabled={isLoading}
-            >
-              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-            </button>
+            {errors.identifier && (
+              <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                <span className="w-1 h-1 bg-rose-600 dark:bg-rose-400 rounded-full"></span>
+                {errors.identifier}
+              </p>
+            )}
           </div>
-          {errors.password && <p className="text-xs text-destructive">{errors.password}</p>}
-        </div>
 
-        <Button 
-          type="submit"
-          className="w-full gradient-brand"
-          disabled={isLoading}
-        >
-          {isLoading ? (
-            <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Signing In...
-            </>
-          ) : (
-            <>
-              <LogIn className="w-4 h-4 mr-2" />
-              Sign In
-            </>
-          )}
-        </Button>
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <Label 
+                htmlFor="password"
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+              >
+                Password
+              </Label>
+              <button 
+                type="button"
+                onClick={() => setView('forgot')}
+                className="text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 font-medium transition-colors duration-200"
+                disabled={isLoading}
+              >
+                Forgot password?
+              </button>
+            </div>
+            <div className="relative">
+              <Input
+                id="password"
+                type={showPassword ? 'text' : 'password'}
+                value={formData.password}
+                onChange={(e) => handleInputChange('password', e.target.value)}
+                placeholder="Enter your password"
+                className={`h-12 px-4 pr-12 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                  focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                  ${errors.password ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+                disabled={isLoading}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors duration-200 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                disabled={isLoading}
+                tabIndex={-1}
+              >
+                {showPassword ? <EyeOff size={20} strokeWidth={2} /> : <Eye size={20} strokeWidth={2} />}
+              </button>
+            </div>
+            {errors.password && (
+              <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                <span className="w-1 h-1 bg-rose-600 dark:bg-rose-400 rounded-full"></span>
+                {errors.password}
+              </p>
+            )}
+          </div>
 
-        <p className="text-center text-caption">
-          Don't have an account?{' '}
+          <Button 
+            type="submit"
+            className="w-full h-12 text-base font-semibold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-slate-200 text-white dark:text-slate-900 rounded-xl shadow-lg shadow-slate-900/10 dark:shadow-slate-100/10 transition-all duration-200 active:scale-[0.98]"
+            disabled={isLoading}
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-5 h-5 mr-2 animate-spin" strokeWidth={2.5} />
+                <span>Signing In...</span>
+              </>
+            ) : (
+              <>
+                <LogIn className="w-5 h-5 mr-2" strokeWidth={2.5} />
+                <span>Sign In</span>
+              </>
+            )}
+          </Button>
+
+          <div className="relative my-8">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-slate-200 dark:border-slate-700"></div>
+            </div>
+            <div className="relative flex justify-center text-sm">
+              <span className="px-4 bg-white dark:bg-slate-950 text-slate-500 dark:text-slate-400 font-medium">
+                New to our platform?
+              </span>
+            </div>
+          </div>
+
           <button 
             type="button"
             onClick={onSwitchToSignup}
-            className="text-brand-600 hover:text-brand-700 font-medium"
+            className="w-full h-12 text-base font-semibold border-2 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50 hover:border-slate-400 dark:hover:border-slate-500 rounded-xl transition-all duration-200 active:scale-[0.98]"
             disabled={isLoading}
           >
-            Sign Up
+            Create an Account
           </button>
-        </p>
-      </form>
+        </form>
+      </div>
     );
   }
 
   // FORGOT PASSWORD VIEW
   if (view === 'forgot') {
     return (
-      <div className="space-y-5">
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-12 h-12 bg-brand-100 rounded-full mb-3">
-            <Mail className="w-6 h-6 text-brand-600" />
+      <div className="w-full max-w-md mx-auto">
+        <div className="mb-10 text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 rounded-2xl mb-5 shadow-sm">
+            <Mail className="w-8 h-8 text-slate-700 dark:text-slate-300" strokeWidth={2} />
           </div>
-          <h3 className="text-xl font-semibold mb-1">Forgot Password?</h3>
-          <p className="text-sm text-muted-foreground">We'll send you a reset code</p>
+          <h2 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mb-3">
+            Forgot Password?
+          </h2>
+          <p className="text-base text-slate-600 dark:text-slate-400 font-normal max-w-sm mx-auto">
+            No worries! Enter your email and we'll send you a reset code
+          </p>
         </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="email">Email Address</Label>
-          <Input
-            id="email"
-            type="email"
-            value={formData.email}
-            onChange={(e) => handleInputChange('email', e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSendOTP()}
-            placeholder="Enter your email"
-            className={errors.email ? 'border-destructive' : ''}
+        <div className="space-y-6">
+          <div className="space-y-2.5">
+            <Label 
+              htmlFor="email"
+              className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+            >
+              Email Address
+            </Label>
+            <Input
+              id="email"
+              type="email"
+              value={formData.email}
+              onChange={(e) => handleInputChange('email', e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSendOTP()}
+              placeholder="john@example.com"
+              className={`h-12 px-4 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                ${errors.email ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                disabled:opacity-50 disabled:cursor-not-allowed
+                placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+              disabled={isLoading}
+              autoFocus
+            />
+            {errors.email && (
+              <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                <span className="w-1 h-1 bg-rose-600 dark:bg-rose-400 rounded-full"></span>
+                {errors.email}
+              </p>
+            )}
+          </div>
+
+          <Button 
+            onClick={handleSendOTP}
+            className="w-full h-12 text-base font-semibold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-slate-200 text-white dark:text-slate-900 rounded-xl shadow-lg shadow-slate-900/10 dark:shadow-slate-100/10 transition-all duration-200 active:scale-[0.98]"
             disabled={isLoading}
-          />
-          {errors.email && <p className="text-xs text-destructive">{errors.email}</p>}
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-5 h-5 mr-2 animate-spin" strokeWidth={2.5} />
+                <span>Sending Code...</span>
+              </>
+            ) : (
+              <>
+                <Mail className="w-5 h-5 mr-2" strokeWidth={2.5} />
+                <span>Send Reset Code</span>
+              </>
+            )}
+          </Button>
+
+          <button 
+            onClick={handleBackToLogin} 
+            className="w-full flex items-center justify-center gap-2 h-12 text-base font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 transition-colors duration-200"
+            disabled={isLoading}
+          >
+            <ArrowLeft className="w-5 h-5" strokeWidth={2} />
+            <span>Back to Sign In</span>
+          </button>
         </div>
-
-        <Button 
-          onClick={handleSendOTP}
-          className="w-full gradient-brand"
-          disabled={isLoading}
-        >
-          {isLoading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Sending...</> : 'Send OTP'}
-        </Button>
-
-        <button 
-          onClick={handleBackToLogin} 
-          className="w-full flex items-center justify-center text-muted-foreground hover:text-foreground text-sm"
-          disabled={isLoading}
-        >
-          <ArrowLeft className="w-4 h-4 mr-2" />Back to Sign In
-        </button>
       </div>
     );
   }
@@ -467,68 +543,107 @@ const LoginForm = ({ onSwitchToSignup }: LoginFormProps) => {
   // OTP VERIFICATION VIEW
   if (view === 'otp') {
     return (
-      <div className="space-y-5">
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-12 h-12 bg-brand-100 rounded-full mb-3">
-            <Mail className="w-6 h-6 text-brand-600" />
+      <div className="w-full max-w-md mx-auto">
+        <div className="mb-10 text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-emerald-100 to-emerald-50 dark:from-emerald-900/30 dark:to-emerald-950/30 rounded-2xl mb-5 shadow-sm">
+            <Shield className="w-8 h-8 text-emerald-700 dark:text-emerald-400" strokeWidth={2} />
           </div>
-          <h3 className="text-xl font-semibold mb-1">Verify OTP</h3>
-          <p className="text-sm text-muted-foreground">Code sent to <span className="font-medium text-brand-600">{formData.email}</span></p>
+          <h2 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mb-3">
+            Verify Your Email
+          </h2>
+          <p className="text-base text-slate-600 dark:text-slate-400 font-normal max-w-sm mx-auto">
+            We sent a 6-digit code to{' '}
+            <span className="font-semibold text-slate-900 dark:text-white block mt-1">
+              {formData.email}
+            </span>
+          </p>
         </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="otp">Enter 6-Digit OTP</Label>
-          <Input
-            id="otp"
-            type="text"
-            inputMode="numeric"
-            maxLength={6}
-            value={formData.otp}
-            onChange={(e) => handleInputChange('otp', e.target.value.replace(/\D/g, ''))}
-            onKeyDown={(e) => e.key === 'Enter' && handleVerifyOTP()}
-            placeholder="000000"
-            className={`text-center text-2xl tracking-widest font-semibold ${errors.otp ? 'border-destructive' : ''}`}
-            disabled={isLoading}
-            autoFocus
-          />
-          {errors.otp && <p className="text-xs text-destructive">{errors.otp}</p>}
-        </div>
-
-        {otpTimer > 0 && (
-          <div className="flex items-center justify-center text-sm bg-brand-50 py-3 px-4 rounded-lg">
-            <Clock className="w-4 h-4 mr-2 text-brand-600" />
-            <span className="text-muted-foreground">Resend in <span className="font-bold text-brand-600">{formatTime(otpTimer)}</span></span>
-          </div>
-        )}
-
-        {canResend && (
-          <div className="text-center bg-green-50 py-3 px-4 rounded-lg">
-            <button 
-              onClick={handleResendOTP} 
-              className="inline-flex items-center gap-2 text-brand-600 hover:text-brand-700 font-semibold text-sm"
-              disabled={isLoading}
+        <div className="space-y-6">
+          <div className="space-y-2.5">
+            <Label 
+              htmlFor="otp"
+              className="text-sm font-semibold text-slate-700 dark:text-slate-300"
             >
-              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-              Resend OTP
-            </button>
+              Verification Code
+            </Label>
+            <Input
+              id="otp"
+              type="text"
+              inputMode="numeric"
+              maxLength={6}
+              value={formData.otp}
+              onChange={(e) => handleInputChange('otp', e.target.value.replace(/\D/g, ''))}
+              onKeyDown={(e) => e.key === 'Enter' && handleVerifyOTP()}
+              placeholder="000000"
+              className={`h-16 px-4 text-center text-3xl tracking-[0.5em] font-bold border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                ${errors.otp ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                disabled:opacity-50 disabled:cursor-not-allowed
+                placeholder:text-slate-300 dark:placeholder:text-slate-600 placeholder:tracking-[0.5em]`}
+              disabled={isLoading}
+              autoFocus
+            />
+            {errors.otp && (
+              <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                <span className="w-1 h-1 bg-rose-600 dark:bg-rose-400 rounded-full"></span>
+                {errors.otp}
+              </p>
+            )}
           </div>
-        )}
 
-        <Button 
-          onClick={handleVerifyOTP}
-          className="w-full gradient-brand"
-          disabled={isLoading || formData.otp.length !== 6}
-        >
-          {isLoading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Verifying...</> : 'Verify OTP'}
-        </Button>
+          {otpTimer > 0 && (
+            <div className="flex items-center justify-center gap-3 bg-gradient-to-r from-slate-50 to-slate-100/50 dark:from-slate-800/50 dark:to-slate-900/30 py-4 px-5 rounded-xl border border-slate-200 dark:border-slate-700">
+              <Clock className="w-5 h-5 text-slate-600 dark:text-slate-400" strokeWidth={2} />
+              <span className="text-sm text-slate-600 dark:text-slate-400 font-medium">
+                Code expires in{' '}
+                <span className="font-bold text-slate-900 dark:text-white tabular-nums">
+                  {formatTime(otpTimer)}
+                </span>
+              </span>
+            </div>
+          )}
 
-        <button 
-          onClick={handleBackToLogin} 
-          className="w-full flex items-center justify-center text-muted-foreground hover:text-foreground text-sm"
-          disabled={isLoading}
-        >
-          <ArrowLeft className="w-4 h-4 mr-2" />Back to Sign In
-        </button>
+          {canResend && (
+            <div className="bg-gradient-to-r from-emerald-50 to-emerald-100/50 dark:from-emerald-900/20 dark:to-emerald-950/20 py-4 px-5 rounded-xl border border-emerald-200 dark:border-emerald-800">
+              <button 
+                onClick={handleResendOTP} 
+                className="w-full inline-flex items-center justify-center gap-2.5 text-emerald-700 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-300 font-semibold text-base transition-colors duration-200"
+                disabled={isLoading}
+              >
+                <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`} strokeWidth={2} />
+                <span>Resend Verification Code</span>
+              </button>
+            </div>
+          )}
+
+          <Button 
+            onClick={handleVerifyOTP}
+            className="w-full h-12 text-base font-semibold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-slate-200 text-white dark:text-slate-900 rounded-xl shadow-lg shadow-slate-900/10 dark:shadow-slate-100/10 transition-all duration-200 active:scale-[0.98] disabled:opacity-50"
+            disabled={isLoading || formData.otp.length !== 6}
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-5 h-5 mr-2 animate-spin" strokeWidth={2.5} />
+                <span>Verifying...</span>
+              </>
+            ) : (
+              <>
+                <Shield className="w-5 h-5 mr-2" strokeWidth={2.5} />
+                <span>Verify Code</span>
+              </>
+            )}
+          </Button>
+
+          <button 
+            onClick={handleBackToLogin} 
+            className="w-full flex items-center justify-center gap-2 h-12 text-base font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 transition-colors duration-200"
+            disabled={isLoading}
+          >
+            <ArrowLeft className="w-5 h-5" strokeWidth={2} />
+            <span>Back to Sign In</span>
+          </button>
+        </div>
       </div>
     );
   }
@@ -536,71 +651,124 @@ const LoginForm = ({ onSwitchToSignup }: LoginFormProps) => {
   // RESET PASSWORD VIEW
   if (view === 'reset') {
     return (
-      <div className="space-y-5">
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-12 h-12 bg-brand-100 rounded-full mb-3">
-            <LogIn className="w-6 h-6 text-brand-600" />
+      <div className="w-full max-w-md mx-auto">
+        <div className="mb-10 text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-100 to-blue-50 dark:from-blue-900/30 dark:to-blue-950/30 rounded-2xl mb-5 shadow-sm">
+            <Lock className="w-8 h-8 text-blue-700 dark:text-blue-400" strokeWidth={2} />
           </div>
-          <h3 className="text-xl font-semibold mb-1">Reset Password</h3>
-          <p className="text-sm text-muted-foreground">Create a new password</p>
+          <h2 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mb-3">
+            Create New Password
+          </h2>
+          <p className="text-base text-slate-600 dark:text-slate-400 font-normal max-w-sm mx-auto">
+            Choose a strong password to secure your account
+          </p>
         </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="newPassword">New Password</Label>
-          <div className="relative">
-            <Input
-              id="newPassword"
-              type={showNewPassword ? 'text' : 'password'}
-              value={formData.newPassword}
-              onChange={(e) => handleInputChange('newPassword', e.target.value)}
-              placeholder="Enter new password"
-              className={errors.newPassword ? 'border-destructive' : ''}
-              disabled={isLoading}
-            />
-            <button
-              type="button"
-              onClick={() => setShowNewPassword(!showNewPassword)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              disabled={isLoading}
+        <div className="space-y-6">
+          <div className="space-y-2.5">
+            <Label 
+              htmlFor="newPassword"
+              className="text-sm font-semibold text-slate-700 dark:text-slate-300"
             >
-              {showNewPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-            </button>
+              New Password
+            </Label>
+            <div className="relative">
+              <Input
+                id="newPassword"
+                type={showNewPassword ? 'text' : 'password'}
+                value={formData.newPassword}
+                onChange={(e) => handleInputChange('newPassword', e.target.value)}
+                placeholder="Enter new password"
+                className={`h-12 px-4 pr-12 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                  focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                  ${errors.newPassword ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+                disabled={isLoading}
+                autoFocus
+              />
+              <button
+                type="button"
+                onClick={() => setShowNewPassword(!showNewPassword)}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors duration-200 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                disabled={isLoading}
+                tabIndex={-1}
+              >
+                {showNewPassword ? <EyeOff size={20} strokeWidth={2} /> : <Eye size={20} strokeWidth={2} />}
+              </button>
+            </div>
+            {errors.newPassword && (
+              <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                <span className="w-1 h-1 bg-rose-600 dark:bg-rose-400 rounded-full"></span>
+                {errors.newPassword}
+              </p>
+            )}
           </div>
-          {errors.newPassword && <p className="text-xs text-destructive">{errors.newPassword}</p>}
-        </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="confirmPassword">Confirm Password</Label>
-          <div className="relative">
-            <Input
-              id="confirmPassword"
-              type={showConfirmPassword ? 'text' : 'password'}
-              value={formData.confirmPassword}
-              onChange={(e) => handleInputChange('confirmPassword', e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleResetPassword()}
-              placeholder="Confirm new password"
-              className={errors.confirmPassword ? 'border-destructive' : ''}
-              disabled={isLoading}
-            />
-            <button
-              type="button"
-              onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              disabled={isLoading}
+          <div className="space-y-2.5">
+            <Label 
+              htmlFor="confirmPassword"
+              className="text-sm font-semibold text-slate-700 dark:text-slate-300"
             >
-              {showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-            </button>
+              Confirm Password
+            </Label>
+            <div className="relative">
+              <Input
+                id="confirmPassword"
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={formData.confirmPassword}
+                onChange={(e) => handleInputChange('confirmPassword', e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleResetPassword()}
+                placeholder="Confirm new password"
+                className={`h-12 px-4 pr-12 text-base border-slate-300 dark:border-slate-600 rounded-xl transition-all duration-200
+                  focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 dark:focus:border-slate-500
+                  ${errors.confirmPassword ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : ''}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  placeholder:text-slate-400 dark:placeholder:text-slate-500`}
+                disabled={isLoading}
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors duration-200 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                disabled={isLoading}
+                tabIndex={-1}
+              >
+                {showConfirmPassword ? <EyeOff size={20} strokeWidth={2} /> : <Eye size={20} strokeWidth={2} />}
+              </button>
+            </div>
+            {errors.confirmPassword && (
+              <p className="text-sm text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1.5 mt-2">
+                <span className="w-1 h-1 bg-rose-600 dark:bg-rose-400 rounded-full"></span>
+                {errors.confirmPassword}
+              </p>
+            )}
           </div>
-          {errors.confirmPassword && <p className="text-xs text-destructive">{errors.confirmPassword}</p>}
-        </div>
 
-        <Button 
-          onClick={handleResetPassword}
-          className="w-full gradient-brand"
-          disabled={isLoading}
-        >
-          {isLoading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Resetting...</> : 'Reset Password'}
-        </Button>
+          <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-xl p-4">
+            <p className="text-sm text-slate-600 dark:text-slate-400 font-medium">
+              Password must be at least 8 characters long
+            </p>
+          </div>
+
+          <Button 
+            onClick={handleResetPassword}
+            className="w-full h-12 text-base font-semibold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-slate-200 text-white dark:text-slate-900 rounded-xl shadow-lg shadow-slate-900/10 dark:shadow-slate-100/10 transition-all duration-200 active:scale-[0.98]"
+            disabled={isLoading}
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-5 h-5 mr-2 animate-spin" strokeWidth={2.5} />
+                <span>Resetting Password...</span>
+              </>
+            ) : (
+              <>
+                <Lock className="w-5 h-5 mr-2" strokeWidth={2.5} />
+                <span>Reset Password</span>
+              </>
+            )}
+          </Button>
+        </div>
       </div>
     );
   }
