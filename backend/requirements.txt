@@ -1,24 +1,30 @@
-# FastAPI and server
+# Query Genie - Unified MySQL & PostgreSQL Backend
+# Python Dependencies
+
+# Core Framework
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
-python-multipart==0.0.6
-slowapi==0.1.9
-
-# Environment and configuration
 python-dotenv==1.0.0
-pydantic[email]==2.5.3
 
-# Database
-sqlalchemy==2.0.25
-mysql-connector-python==8.3.0
+# Database Drivers
+psycopg2-binary==2.9.9        # PostgreSQL driver
+mysql-connector-python==8.2.0  # MySQL driver
+sqlalchemy==2.0.25            # ORM & database toolkit
 
-# Authentication and security
-passlib[bcrypt]==1.7.4
+# Authentication & Security
+passlib[bcrypt]==1.7.4        # Password hashing
+bcrypt==4.1.2                 # Bcrypt backend
+pydantic[email]==2.5.3        # Data validation with email support
+email-validator==2.1.0        # Email validation
 
-# LangChain and AI
-langchain-core==0.1.23
-langchain-community==0.0.20
-langchain-groq==0.0.1
+# AI & LangChain
+langchain==0.1.4
+langchain-core==0.1.16
+langchain-community==0.0.16
+langchain-groq==0.0.1         # Groq LLM integration
 
-# Groq API
-groq==0.4.1
+# Rate Limiting
+slowapi==0.1.9                # Rate limiting for FastAPI
+
+# Optional but Recommended
+python-multipart==0.0.6       # For form data handling

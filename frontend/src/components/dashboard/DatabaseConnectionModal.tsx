@@ -7,6 +7,7 @@ import { Database, Loader2, CheckCircle, AlertCircle, Lightbulb, XCircle, WifiOf
 import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 
 const API_BASE = "http://localhost:8000";
 
@@ -21,6 +22,7 @@ interface DBCredentials {
   port: string;
   user: string;
   password: string;
+  db_type: 'mysql' | 'postgresql'; // ✨ NEW: Database type
 }
 
 interface ConnectionError {
@@ -33,6 +35,24 @@ interface ConnectionError {
 
 type ConnectionStep = 'credentials' | 'database-selection';
 
+// ✨ NEW: Database type configurations
+const DB_CONFIGS = {
+  mysql: {
+    name: 'MySQL',
+    defaultPort: '3306',
+    icon: '🐬',
+    color: 'blue',
+    description: 'Most popular open-source database'
+  },
+  postgresql: {
+    name: 'PostgreSQL',
+    defaultPort: '5432',
+    icon: '🐘',
+    color: 'indigo',
+    description: 'Advanced open-source database'
+  }
+} as const;
+
 export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: DatabaseConnectionModalProps) => {
   // Step management
   const [currentStep, setCurrentStep] = useState<ConnectionStep>('credentials');
@@ -43,6 +63,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
     port: '3306',
     user: 'root',
     password: '',
+    db_type: 'mysql', // ✨ NEW: Default to MySQL
   });
 
   // Database selection state
@@ -61,6 +82,22 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
   const [connectionError, setConnectionError] = useState<ConnectionError | null>(null);
   
   const { toast } = useToast();
+
+  // ✨ NEW: Handle database type change
+  const handleDatabaseTypeChange = (newType: 'mysql' | 'postgresql') => {
+    const newPort = DB_CONFIGS[newType].defaultPort;
+    const defaultUser = newType === 'postgresql' ? 'postgres' : 'root';
+    
+    setCredentials(prev => ({ 
+      ...prev, 
+      db_type: newType,
+      port: newPort,
+      user: defaultUser // ✅ Auto-update username
+    }));
+    if (connectionError) {
+      setConnectionError(null);
+    }
+  };
 
   const handleCredentialsChange = (field: keyof DBCredentials, value: string) => {
     setCredentials(prev => ({ ...prev, [field]: value }));
@@ -110,7 +147,8 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
           host: credentials.host.trim(),
           port: portNum,
           user: credentials.user.trim(),
-          password: credentials.password
+          password: credentials.password,
+          db_type: credentials.db_type // ✨ NEW: Send database type
         })
       });
 
@@ -130,13 +168,13 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
             toast({
               variant: "destructive",
               title: "Connection Refused",
-              description: "Cannot connect to MySQL server",
+              description: `Cannot connect to ${DB_CONFIGS[credentials.db_type].name} server`,
             });
           }
         } else {
           setConnectionError({
             error: "Connection Error",
-            message: data.message || 'Failed to connect to MySQL server.',
+            message: data.message || `Failed to connect to ${DB_CONFIGS[credentials.db_type].name} server.`,
             code: "UNKNOWN_ERROR"
           });
         }
@@ -148,13 +186,13 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
         setCurrentStep('database-selection');
         toast({
           title: "✅ Server Connected",
-          description: `Found ${data.databases?.length || 0} database(s)`,
+          description: `Found ${data.databases?.length || 0} database(s) on ${DB_CONFIGS[credentials.db_type].name}`,
         });
       } else {
         setConnectionError({
           error: "No Databases Found",
           message: "No user databases found on this server.",
-          suggestion: "CREATE DATABASE my_database;",
+          suggestion: `CREATE DATABASE my_database;`,
           code: "NO_DATABASES"
         });
       }
@@ -163,7 +201,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
       setConnectionError({
         error: "Network Error",
         message: "Unable to reach the backend server. Please ensure the server is running on port 8000.",
-        suggestion: "Start the backend server using: python main.py",
+        suggestion: "Start the backend server using: python main_unified.py",
         code: "NETWORK_ERROR"
       });
       
@@ -191,8 +229,9 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
       return;
     }
 
-    if (dbName.length > 64) {
-      setCreateError("Database name must be 64 characters or less");
+    const maxLength = credentials.db_type === 'postgresql' ? 63 : 64;
+    if (dbName.length > maxLength) {
+      setCreateError(`Database name must be ${maxLength} characters or less`);
       return;
     }
 
@@ -215,7 +254,8 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
           port: portNum,
           user: credentials.user.trim(),
           password: credentials.password,
-          database_name: dbName
+          database_name: dbName,
+          db_type: credentials.db_type // ✨ NEW: Send database type
         })
       });
 
@@ -229,7 +269,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
             toast({
               variant: "destructive",
               title: "Permission Denied",
-              description: "Your MySQL user doesn't have permission to create databases",
+              description: `Your ${DB_CONFIGS[credentials.db_type].name} user doesn't have permission to create databases`,
             });
           } else if (data.detail.code === 'DATABASE_EXISTS') {
             toast({
@@ -247,7 +287,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
       if (data.success) {
         toast({
           title: "✅ Database Created!",
-          description: `Database '${dbName}' created successfully`,
+          description: `${DB_CONFIGS[credentials.db_type].name} database '${dbName}' created successfully`,
           duration: 3000,
         });
 
@@ -298,7 +338,8 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
           port: portNum,
           user: credentials.user.trim(),
           password: credentials.password,
-          database: selectedDatabase
+          database: selectedDatabase,
+          db_type: credentials.db_type // ✨ NEW: Send database type
         })
       });
 
@@ -318,23 +359,32 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
       }
 
       if (data.success) {
-        toast({
-          title: "✅ Connection Successful!",
-          description: `Connected to ${selectedDatabase} database successfully.`,
-          duration: 5000,
-        });
-        
-        onConnect({
-          type: 'mysql',
-          host: credentials.host,
-          port: credentials.port,
-          user: credentials.user,
-          password: credentials.password,
-          database: selectedDatabase
-        });
-        
-        handleClose();
-      }
+  console.log('[MODAL] Connection successful, calling onConnect with:', {
+    db_type: credentials.db_type,
+    host: credentials.host,
+    port: credentials.port,
+    user: credentials.user,
+    database: selectedDatabase
+  });
+  
+  toast({
+    title: "✅ Connection Successful!",
+    description: `Connected to ${DB_CONFIGS[credentials.db_type].name} database '${selectedDatabase}' successfully.`,
+    duration: 5000,
+  });
+  
+  onConnect({
+    db_type: credentials.db_type, // ✅ Changed from 'type' to 'db_type'
+    host: credentials.host,
+    port: credentials.port,
+    user: credentials.user,
+    password: credentials.password,
+    database: selectedDatabase
+  });
+  
+  console.log('[MODAL] onConnect called, now calling handleClose');
+  handleClose();
+}
     } catch (error: any) {
       console.error('Error connecting to database:', error);
       setConnectionError({
@@ -365,7 +415,8 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
       host: '127.0.0.1',
       port: '3306',
       user: 'root',
-      password: ''
+      password: '',
+      db_type: 'mysql'
     });
     setAvailableDatabases([]);
     setSelectedDatabase('');
@@ -458,6 +509,9 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
   };
 
   const isCredentialsValid = credentials.host && credentials.port && credentials.user;
+
+  // ✨ NEW: Get current database config
+  const currentDbConfig = DB_CONFIGS[credentials.db_type];
   
   return (
     <>
@@ -467,11 +521,13 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Database className="h-5 w-5 text-primary" />
-              {currentStep === 'credentials' ? 'Connect to MySQL Server' : 'Select Database'}
+              {currentStep === 'credentials' 
+                ? 'Connect to Database Server' 
+                : `Select ${currentDbConfig.name} Database`}
             </DialogTitle>
             <DialogDescription>
               {currentStep === 'credentials' 
-                ? 'Enter your MySQL server credentials to view available databases'
+                ? 'Choose your database type and enter server credentials'
                 : 'Choose a database to connect to and start querying'
               }
             </DialogDescription>
@@ -513,6 +569,64 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
           <div className="space-y-4 py-2" onKeyPress={handleKeyPress}>
             {currentStep === 'credentials' ? (
               <>
+                {/* ✨ NEW: Database Type Selection */}
+                <div className="space-y-3">
+                  <Label className="flex items-center gap-1">
+                    Database Type <span className="text-red-500">*</span>
+                  </Label>
+                  <RadioGroup
+                    value={credentials.db_type}
+                    onValueChange={handleDatabaseTypeChange}
+                    disabled={isLoadingDatabases}
+                    className="grid grid-cols-2 gap-3"
+                  >
+                    {/* MySQL Option */}
+                    <div className="relative">
+                      <RadioGroupItem
+                        value="mysql"
+                        id="mysql"
+                        className="peer sr-only"
+                      />
+                      <Label
+                        htmlFor="mysql"
+                        className="flex flex-col items-center justify-between rounded-lg border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/5 cursor-pointer transition-all"
+                      >
+                        <div className="text-3xl mb-2">{DB_CONFIGS.mysql.icon}</div>
+                        <div className="text-center space-y-1">
+                          <div className="font-semibold">{DB_CONFIGS.mysql.name}</div>
+                          <div className="text-xs text-muted-foreground">
+                            Port {DB_CONFIGS.mysql.defaultPort}
+                          </div>
+                        </div>
+                      </Label>
+                    </div>
+
+                    {/* PostgreSQL Option */}
+                    <div className="relative">
+                      <RadioGroupItem
+                        value="postgresql"
+                        id="postgresql"
+                        className="peer sr-only"
+                      />
+                      <Label
+                        htmlFor="postgresql"
+                        className="flex flex-col items-center justify-between rounded-lg border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/5 cursor-pointer transition-all"
+                      >
+                        <div className="text-3xl mb-2">{DB_CONFIGS.postgresql.icon}</div>
+                        <div className="text-center space-y-1">
+                          <div className="font-semibold">{DB_CONFIGS.postgresql.name}</div>
+                          <div className="text-xs text-muted-foreground">
+                            Port {DB_CONFIGS.postgresql.defaultPort}
+                          </div>
+                        </div>
+                      </Label>
+                    </div>
+                  </RadioGroup>
+                  <p className="text-xs text-muted-foreground">
+                    {currentDbConfig.description}
+                  </p>
+                </div>
+
                 {/* Step 1: Credentials Form */}
                 <div className="space-y-2">
                   <Label htmlFor="host" className="flex items-center gap-1">
@@ -527,7 +641,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                     className="font-mono"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Server address where MySQL is running
+                    Server address where {currentDbConfig.name} is running
                   </p>
                 </div>
                 
@@ -539,7 +653,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                     id="port" 
                     value={credentials.port} 
                     onChange={(e) => handleCredentialsChange('port', e.target.value)}
-                    placeholder="3306"
+                    placeholder={currentDbConfig.defaultPort}
                     disabled={isLoadingDatabases}
                     className="font-mono"
                     type="number"
@@ -547,7 +661,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                     max="65535"
                   />
                   <p className="text-xs text-muted-foreground">
-                    MySQL server port (default: 3306)
+                    {currentDbConfig.name} server port (default: {currentDbConfig.defaultPort})
                   </p>
                 </div>
                 
@@ -559,7 +673,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                     id="user" 
                     value={credentials.user} 
                     onChange={(e) => handleCredentialsChange('user', e.target.value)}
-                    placeholder="root"
+                    placeholder={credentials.db_type === 'postgresql' ? 'postgres' : 'root'}
                     disabled={isLoadingDatabases}
                     className="font-mono"
                     autoComplete="username"
@@ -567,6 +681,20 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                   <p className="text-xs text-muted-foreground">
                     Database username for authentication
                   </p>
+                </div>
+
+                {/* ✨ NEW: Helpful credentials info box */}
+                <div className="rounded-lg bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 p-3">
+                  <div className="flex items-start gap-2">
+                    <Lightbulb className="h-4 w-4 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
+                    <div className="text-xs text-blue-900 dark:text-blue-100">
+                      <p className="font-semibold mb-1">💡 Default Credentials:</p>
+                      <ul className="space-y-1 text-blue-800 dark:text-blue-200">
+                        <li><strong>MySQL:</strong> User: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">root</code>, Port: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">3306</code></li>
+                        <li><strong>PostgreSQL:</strong> User: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">postgres</code>, Port: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">5432</code></li>
+                      </ul>
+                    </div>
+                  </div>
                 </div>
                 
                 <div className="space-y-2">
@@ -620,7 +748,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                   <div className="flex items-center gap-2 text-sm">
                     <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
                     <span className="font-medium text-green-900 dark:text-green-100">
-                      Server Connected Successfully
+                      {currentDbConfig.icon} {currentDbConfig.name} Server Connected
                     </span>
                   </div>
                   <div className="text-xs text-green-700 dark:text-green-300 pl-6 font-mono">
@@ -707,10 +835,10 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Plus className="h-5 w-5 text-primary" />
-              Create New Database
+              Create New {currentDbConfig.name} Database
             </DialogTitle>
             <DialogDescription>
-              Enter a name for your new MySQL database
+              Enter a name for your new {currentDbConfig.name} database
             </DialogDescription>
           </DialogHeader>
 
@@ -741,7 +869,7 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                 autoFocus
               />
               <p className="text-xs text-muted-foreground">
-                Only letters, numbers, and underscores allowed (max 64 characters)
+                Only letters, numbers, and underscores allowed (max {credentials.db_type === 'postgresql' ? '63' : '64'} characters)
               </p>
             </div>
 

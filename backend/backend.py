@@ -24,7 +24,7 @@ import ast
 import json
 import re
 from functools import lru_cache
-from typing import Dict, Optional
+from typing import Dict, Optional, Literal
 import hashlib
 import logging
 from urllib.parse import quote_plus 
@@ -75,17 +75,34 @@ def make_tz_aware(dt):
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
-# ============= ✅ FIX #1: CONNECTION POOL CACHE =============
+# ============= DATABASE TYPE HELPER =============
+class DatabaseType:
+    """Database type constants"""
+    MYSQL = "mysql"
+    POSTGRESQL = "postgresql"
+    
+    @staticmethod
+    def get_default_port(db_type: str) -> int:
+        """Get default port for database type"""
+        return 5432 if db_type == DatabaseType.POSTGRESQL else 3306
+    
+    @staticmethod
+    def get_driver(db_type: str) -> str:
+        """Get SQLAlchemy driver for database type"""
+        return "postgresql" if db_type == DatabaseType.POSTGRESQL else "mysql+mysqlconnector"
+
+# ============= CONNECTION POOL CACHE =============
 class DatabaseConnectionPool:
-    """Maintains connection pools for MySQL databases"""
+    """Maintains connection pools for MySQL and PostgreSQL databases"""
     def __init__(self):
         self._pools: Dict[str, create_engine] = {}
         self._db_instances: Dict[str, SQLDatabase] = {}
+        self._db_types: Dict[str, str] = {}  # Track database types
     
-    def get_engine(self, db_uri: str):
+    def get_engine(self, db_uri: str, db_type: str = None):
         """Get or create connection pool for a database"""
         if db_uri not in self._pools:
-            print(f"[POOL] Creating new connection pool for {db_uri}")
+            print(f"[POOL] Creating new connection pool for {db_type or 'unknown'} database")
             self._pools[db_uri] = create_engine(
                 db_uri,
                 poolclass=pool.QueuePool,
@@ -96,15 +113,23 @@ class DatabaseConnectionPool:
                 pool_pre_ping=True,
                 echo=False
             )
+            if db_type:
+                self._db_types[db_uri] = db_type
         return self._pools[db_uri]
     
-    def get_db(self, db_uri: str) -> SQLDatabase:
+    def get_db(self, db_uri: str, db_type: str = None) -> SQLDatabase:
         """Get or create SQLDatabase instance with pooled connection"""
         if db_uri not in self._db_instances:
-            print(f"[POOL] Creating new SQLDatabase instance for {db_uri}")
-            engine = self.get_engine(db_uri)
+            print(f"[POOL] Creating new SQLDatabase instance for {db_type or 'unknown'}")
+            engine = self.get_engine(db_uri, db_type)
             self._db_instances[db_uri] = SQLDatabase(engine)
+            if db_type:
+                self._db_types[db_uri] = db_type
         return self._db_instances[db_uri]
+    
+    def get_db_type(self, db_uri: str) -> Optional[str]:
+        """Get the database type for a URI"""
+        return self._db_types.get(db_uri)
     
     def clear_pool(self, db_uri: str):
         """Clear connection pool for a specific database"""
@@ -113,11 +138,13 @@ class DatabaseConnectionPool:
             del self._pools[db_uri]
         if db_uri in self._db_instances:
             del self._db_instances[db_uri]
+        if db_uri in self._db_types:
+            del self._db_types[db_uri]
 
 # Global connection pool manager
 db_pool_manager = DatabaseConnectionPool()
 
-# ============= ✅ FIX #2: SCHEMA CACHING =============
+# ============= SCHEMA CACHING =============
 class SchemaCache:
     """Cache database schemas to avoid repeated fetching"""
     def __init__(self):
@@ -155,7 +182,7 @@ class SchemaCache:
 # Global schema cache
 schema_cache = SchemaCache()
 
-# ============= ✅ FIX #3: QUERY RESULT CACHING =============
+# ============= QUERY RESULT CACHING =============
 class QueryCache:
     """Cache query results for identical queries"""
     def __init__(self, max_size: int = 100):
@@ -271,13 +298,11 @@ app = FastAPI()
 # ============= RATE LIMITING SETUP =============
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
+
 # Custom error handler for rate limit exceeded
 @app.exception_handler(RateLimitExceeded)
 async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    """
-    Returns user-friendly error message when rate limit is exceeded
-    Status code 429 = Too Many Requests
-    """
+    """Returns user-friendly error message when rate limit is exceeded"""
     return JSONResponse(
         status_code=429,
         content={
@@ -287,9 +312,7 @@ async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
             "detail": str(exc.detail),
             "retry_after": 60
         },
-        headers={
-            "Retry-After": "60" 
-        }
+        headers={"Retry-After": "60"}
     )
 
 # CORS Middleware
@@ -306,176 +329,15 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
-# ============= STARTUP EVENT =============
-@app.on_event("startup")
-async def startup_event():
-    """Validate environment on startup"""
-    validate_environment()
-    
-    # ✅ Verify slowapi is working
-    try:
-        import slowapi
-        version = getattr(slowapi, '__version__', 'unknown')
-        logger.info(f"✅ Rate limiting enabled (slowapi v{version})")
-    except ImportError:
-        logger.warning("⚠️ slowapi not installed - rate limiting will not work!")
-    except Exception as e:
-        logger.warning(f"⚠️ Rate limiting may not be working: {e}")
-    
-    logger.info("🚀 Application started successfully")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on shutdown"""
-    logger.info("🛑 Shutting down application...")
-    
-    # Close all connection pools
-    for db_uri in list(db_pool_manager._pools.keys()):
-        db_pool_manager.clear_pool(db_uri)
-    
-    # Clear all caches
-    schema_cache._cache.clear()
-    query_cache.clear()
-    
-    logger.info("✅ Cleanup completed")
-
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "database_connected": hasattr(app.state, "db_uri"),
-        "cache_stats": {
-            "schema_cache": len(schema_cache._cache),
-            "query_cache": len(query_cache._cache),
-            "connection_pools": len(db_pool_manager._pools)
-        }
-    }
-@app.get("/api/tables")
-@limiter.limit("30/minute")
-async def get_all_tables(request: Request):
-    """Get list of all tables in the connected database (Rate limited: 30 requests per minute)"""
-    if not hasattr(app.state, "db_uri"):
-        raise HTTPException(status_code=400, detail="Database not connected")
-    
-    try:
-        # Get pooled database connection
-        engine = db_pool_manager.get_engine(app.state.db_uri)
-        
-        # Use SQLAlchemy inspector to get table names
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-        
-        print(f"[GET TABLES] Retrieved {len(tables)} tables")
-        
-        return {
-            "success": True,
-            "tables": tables,
-            "count": len(tables),
-            "database": app.state.db_name if hasattr(app.state, 'db_name') else 'unknown'
-        }
-    
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[GET TABLES ERROR] {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve tables: {error_msg}"
-        )
-
-
-@app.get("/api/table-schema/{table_name}")
-@limiter.limit("30/minute")
-async def get_table_schema(
-    request: Request,
-    table_name: str
-):
-    """Get schema for a specific table (Rate limited: 30 requests per minute)"""
-    if not hasattr(app.state, "db_uri"):
-        raise HTTPException(status_code=400, detail="Database not connected")
-    
-    try:
-        engine = db_pool_manager.get_engine(app.state.db_uri)
-        inspector = inspect(engine)
-        if table_name not in inspector.get_table_names():
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Table '{table_name}' not found"
-            )
-        columns = inspector.get_columns(table_name)
-
-        # Get Primary key  constraints
-        pk_constraint = inspector.get_pk_constraint(table_name)
-        primary_keys = pk_constraint.get('constrained_columns', []) if pk_constraint else []
-
-        fk_constraints = inspector.get_foreign_keys(table_name)
-        foreign_keys = []
-        for fk in fk_constraints:
-            foreign_keys.extend(fk.get('constrained_columns', []))
-        
-        # Get unique constraints
-        unique_constraints = inspector.get_unique_constraints(table_name)
-        unique_columns = []
-        for uc in unique_constraints:
-            unique_columns.extend(uc.get('column_names', []))
-        
-        schema_info = []
-        for col in columns:
-            col_name = col['name']
-            
-            # Determine key type
-            key = None
-            if col_name in primary_keys:
-                key = 'PRI'
-            elif col_name in foreign_keys:
-                key = 'MUL'
-            elif col_name in unique_columns:
-                key = 'UNI'
-            
-            schema_info.append({
-                'name': col_name,
-                'type': str(col['type']),
-                'nullable': col.get('nullable', True),
-                'key': key,
-                'default': str(col['default']) if col.get('default') is not None else None,
-                'autoincrement': col.get('autoincrement', False)
-            })
-        
-        print(f"[GET SCHEMA] Retrieved schema for table '{table_name}': {len(schema_info)} columns")
-        
-        return {
-            "success": True,
-            "table_name": table_name,
-            "columns": schema_info,
-            "column_count": len(schema_info)
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[GET SCHEMA ERROR] Failed to get schema for '{table_name}': {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve table schema: {error_msg}"
-        )
-    
-# Pydantic Models
-class DBConfig(BaseModel):
-    host: str
-    port: int
-    user: str
-    password: str = ""
-    database: str
-
-# Add these two new models after DBConfig
+# ============= PYDANTIC MODELS =============
 class DBCredentials(BaseModel):
     """Step 1: Verify credentials without database"""
     host: str
     port: int
     user: str
     password: str = ""
+    db_type: Literal["mysql", "postgresql"]  # ✨ NEW: Database type selection
 
 class DBSelection(BaseModel):
     """Step 2: Connect to selected database"""
@@ -484,6 +346,7 @@ class DBSelection(BaseModel):
     user: str
     password: str = ""
     database: str
+    db_type: Literal["mysql", "postgresql"]  # ✨ Database type
 
 class DBCreate(BaseModel):
     """Step 2.5: Create new database"""
@@ -491,7 +354,8 @@ class DBCreate(BaseModel):
     port: int
     user: str
     password: str = ""
-    database_name: str  # New database name to create
+    database_name: str
+    db_type: Literal["mysql", "postgresql"]  # ✨ NEW: Database type
 
 class ChatRequest(BaseModel):
     question: str
@@ -558,7 +422,7 @@ def get_db():
     finally:
         db.close()
 
-# Helper Functions
+# ============= HELPER FUNCTIONS =============
 def generate_otp():
     return str(random.randint(100000, 999999))
 
@@ -596,7 +460,7 @@ def send_otp_email(recipient_email: str, otp: str) -> bool:
     except Exception as e:
         print(f"[OTP] Failed to send email to {recipient_email}: {e}")
         return False
-    
+
 def send_password_reset_email(recipient_email: str, otp: str) -> bool:
     """Send password reset OTP email"""
     if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
@@ -704,7 +568,59 @@ def send_email_change_otp(recipient_email: str, otp: str, user_name: str) -> boo
     except Exception as e:
         print(f"[EMAIL CHANGE] Failed for {recipient_email}: {e}")
         return False
+
+# ============= DATABASE-SPECIFIC HELPERS =============
+def build_db_uri(config, database: str = None) -> str:
+    """Build database URI based on database type"""
+    password = quote_plus(config.password) if config.password else ""
     
+    if config.db_type == DatabaseType.POSTGRESQL:
+        # PostgreSQL uses 'postgresql://' or 'postgresql+psycopg2://'
+        if database:
+            return f"postgresql://{config.user}:{password}@{config.host}:{config.port}/{database}"
+        else:
+            # Connect to default 'postgres' database for listing
+            return f"postgresql://{config.user}:{password}@{config.host}:{config.port}/postgres"
+    else:  # MySQL
+        if database:
+            return f"mysql+mysqlconnector://{config.user}:{password}@{config.host}:{config.port}/{database}"
+        else:
+            # MySQL allows connection without database
+            return f"mysql+mysqlconnector://{config.user}:{password}@{config.host}:{config.port}"
+
+def get_list_databases_query(db_type: str) -> tuple[str, list]:
+    """Get query to list databases based on type"""
+    if db_type == DatabaseType.POSTGRESQL:
+        return (
+            "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres'",
+            ['postgres', 'template0', 'template1']
+        )
+    else:  # MySQL
+        return (
+            "SHOW DATABASES",
+            ['information_schema', 'mysql', 'performance_schema', 'sys']
+        )
+
+def get_create_database_query(db_type: str, database_name: str) -> str:
+    """Get CREATE DATABASE query based on type"""
+    if db_type == DatabaseType.POSTGRESQL:
+        # PostgreSQL requires quoted identifiers
+        return f'CREATE DATABASE "{database_name}"'
+    else:  # MySQL
+        return f"CREATE DATABASE `{database_name}`"
+
+def get_list_tables_query(db_type: str, database_name: str = None) -> str:
+    """Get query to list tables based on database type"""
+    if db_type == DatabaseType.POSTGRESQL:
+        return """
+        SELECT tablename 
+        FROM pg_catalog.pg_tables 
+        WHERE schemaname != 'pg_catalog' 
+        AND schemaname != 'information_schema'
+        """
+    else:  # MySQL
+        return "SHOW TABLES"
+
 # SQL Safety
 DANGEROUS_KEYWORDS = ["DROP", "TRUNCATE", "DELETE", "ALTER", "UPDATE"]
 FORBIDDEN_PATTERNS = [
@@ -734,7 +650,7 @@ def sql_to_table_preview(sql: str):
 
     if sql_upper.startswith("DELETE"):
         action = "DELETE"
-        match = re.search(r"FROM\s+`?(\w+)`?", sql_upper)
+        match = re.search(r"FROM\s+[`\"]?(\w+)[`\"]?", sql_upper)
         if match:
             table = match.group(1)
         where_match = re.search(r"WHERE\s+(.+)", sql, re.IGNORECASE)
@@ -742,7 +658,7 @@ def sql_to_table_preview(sql: str):
             condition = where_match.group(1)
     elif sql_upper.startswith("UPDATE"):
         action = "UPDATE"
-        match = re.search(r"UPDATE\s+`?(\w+)`?", sql_upper)
+        match = re.search(r"UPDATE\s+[`\"]?(\w+)[`\"]?", sql_upper)
         if match:
             table = match.group(1)
         where_match = re.search(r"WHERE\s+(.+)", sql, re.IGNORECASE)
@@ -750,7 +666,7 @@ def sql_to_table_preview(sql: str):
             condition = where_match.group(1)
     elif sql_upper.startswith("DROP"):
         action = "DROP"
-        match = re.search(r"DROP\s+TABLE\s+`?(\w+)`?", sql_upper)
+        match = re.search(r"DROP\s+TABLE\s+[`\"]?(\w+)[`\"]?", sql_upper)
         if match:
             table = match.group(1)
 
@@ -771,7 +687,7 @@ def get_user(identifier: str, db):
         (User.email == identifier) | (User.username == identifier)
     ).first()
 
-# ============= ✅ FIX #4: OPTIMIZED COLUMN DETECTION =============
+# ============= OPTIMIZED COLUMN DETECTION =============
 @lru_cache(maxsize=128)
 def get_columns_cached(db_uri: str, table_name: str) -> tuple:
     """Cached column detection"""
@@ -798,10 +714,10 @@ def get_columns_from_query_result(db_uri: str, sql_query: str) -> list:
 def extract_table_name_from_query(sql_query: str) -> str:
     try:
         patterns = [
-            r'FROM\s+`?(\w+)`?',
-            r'JOIN\s+`?(\w+)`?',
-            r'INTO\s+`?(\w+)`?',
-            r'UPDATE\s+`?(\w+)`?',
+            r'FROM\s+[`\"]?(\w+)[`\"]?',
+            r'JOIN\s+[`\"]?(\w+)[`\"]?',
+            r'INTO\s+[`\"]?(\w+)[`\"]?',
+            r'UPDATE\s+[`\"]?(\w+)[`\"]?',
         ]
         for pattern in patterns:
             match = re.search(pattern, sql_query, re.IGNORECASE)
@@ -811,10 +727,36 @@ def extract_table_name_from_query(sql_query: str) -> str:
     except Exception as e:
         return None
 
-# ============= ✅ FIX #5: OPTIMIZED LANGCHAIN WITH CACHING =============
-def get_sql_chain(cached_schema: str):
-    """Create LangChain with pre-fetched schema and improved prompt"""
-    template = """You are a MySQL expert. Generate ONLY valid MySQL statements - no explanations, markdown, or extra text.
+# ============= LANGCHAIN WITH DATABASE-AWARE PROMPTS =============
+def get_sql_chain(cached_schema: str, db_type: str):
+    """Create LangChain with database-specific prompts"""
+    
+    if db_type == DatabaseType.POSTGRESQL:
+        template = """You are a PostgreSQL expert. Generate ONLY valid PostgreSQL statements - no explanations, markdown, or extra text.
+
+QUERY PATTERNS:
+- "show tables" / "list tables" → SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname != 'pg_catalog' AND schemaname != 'information_schema';
+- "show all data" / "all records from X" → SELECT * FROM "X";
+- "count" / "how many" / "total" → SELECT COUNT(*) as count FROM "table";
+- "table count" / "number of tables" → SELECT COUNT(*) as table_count FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
+- "current database" / "database name" → SELECT current_database() as current_database;
+- "all databases" / "list databases" → SELECT datname FROM pg_database WHERE datistemplate = false;
+
+POSTGRESQL RULES:
+- Use double quotes "table_name" for identifiers, not backticks
+- Return ONLY SQL, no ```sql blocks or comments
+- Never mix COUNT(*) with non-aggregated columns without GROUP BY
+- Use LIMIT instead of LIMIT with OFFSET for pagination
+- PostgreSQL uses $1, $2 for parameters (but don't use in generated queries)
+- Use SERIAL or BIGSERIAL for auto-increment, not AUTO_INCREMENT
+
+Schema: {schema}
+History: {chat_history}
+Question: {question}
+
+SQL:"""
+    else:  # MySQL
+        template = """You are a MySQL expert. Generate ONLY valid MySQL statements - no explanations, markdown, or extra text.
 
 QUERY PATTERNS:
 - "show tables" / "list tables" → SHOW TABLES;
@@ -825,10 +767,12 @@ QUERY PATTERNS:
 - "current database" / "database name" / "which database" → SELECT DATABASE() as current_database;
 - "all databases" / "list databases" → SHOW DATABASES;
 
-RULES:
+MYSQL RULES:
+- Use backticks `table_name` for identifiers
 - Return ONLY SQL, no ```sql blocks or comments
 - Never mix COUNT(*) with non-aggregated columns without GROUP BY
 - Use DATABASE() for current database, SHOW DATABASES for all databases
+- Use AUTO_INCREMENT for auto-increment columns
 
 Schema: {schema}
 History: {chat_history}
@@ -849,15 +793,15 @@ SQL:"""
         | StrOutputParser()
     )
 
-def get_response(question, db, chat_history, db_uri, cached_schema):
-    """Optimized response generation with better handling for SHOW commands"""
+def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
+    """Optimized response generation with database-aware handling"""
     
     # Check query cache first
     cached_result = query_cache.get(question, db_uri, chat_history)
     if cached_result:
         return cached_result
     
-    chain = get_sql_chain(cached_schema)
+    chain = get_sql_chain(cached_schema, db_type)
     formatted_chat_history = "\n".join([
         f"{'Human' if isinstance(msg, HumanMessage) else 'AI'}: {msg.content}"
         for msg in chat_history[-6:]
@@ -895,68 +839,15 @@ def get_response(question, db, chat_history, db_uri, cached_schema):
         
         sql_upper = sql_query.upper()
         
-        # Handle SHOW commands specially
-        is_show_command = sql_upper.startswith('SHOW')
+        # Handle different query types
+        is_show_command = 'SHOW' in sql_upper or 'pg_catalog' in sql_query or 'pg_database' in sql_query
         is_select = sql_upper.startswith('SELECT')
         
         # Execute the query
         result = db.run(sql_query)
         
         # Parse results based on query type
-        if is_show_command:
-            # Handle SHOW TABLES specifically
-            if 'TABLES' in sql_upper:
-                clean_result = result.strip()
-                
-                # Parse the result
-                if clean_result == '[]' or not clean_result:
-                    output_data = {
-                        "type": "select",
-                        "data": [],
-                        "columns": ["Tables"],
-                        "row_count": 0
-                    }
-                else:
-                    try:
-                        # Parse table names from result
-                        cleaned = re.sub(r"Decimal\('([^']+)'\)", r"'\1'", clean_result)
-                        cleaned = cleaned.replace("'", '"').replace('None', 'null')
-                        
-                        try:
-                            raw_data = json.loads(cleaned)
-                        except:
-                            raw_data = ast.literal_eval(clean_result)
-                        
-                        # Extract table names
-                        table_names = []
-                        if isinstance(raw_data, list):
-                            for item in raw_data:
-                                if isinstance(item, (tuple, list)) and len(item) > 0:
-                                    table_names.append([str(item[0])])
-                                elif isinstance(item, str):
-                                    table_names.append([item])
-                        
-                        output_data = {
-                            "type": "select",
-                            "data": table_names,
-                            "columns": [f"Tables_in_{app.state.db_name}"] if hasattr(app.state, 'db_name') else ["Tables"],
-                            "row_count": len(table_names)
-                        }
-                    except Exception as e:
-                        print(f"Error parsing SHOW TABLES: {e}, raw result: {clean_result}")
-                        output_data = {
-                            "type": "error",
-                            "message": f"Failed to parse tables: {str(e)}"
-                        }
-            else:
-                # Other SHOW commands
-                output_data = {
-                    "type": "status",
-                    "message": result.strip()
-                }
-        
-        elif is_select:
-            # Handle SELECT queries
+        if is_show_command or is_select:
             columns = get_columns_from_query_result(db_uri, sql_query)
             if not columns:
                 table_name = extract_table_name_from_query(sql_query)
@@ -1000,7 +891,6 @@ def get_response(question, db, chat_history, db_uri, cached_schema):
                         else:
                             data = [[str(item) if item is not None else ''] for item in raw_data]
                         
-                        # If we have data but no columns, generate them
                         if data and not columns:
                             columns = [f'column_{i}' for i in range(len(data[0]))]
                         
@@ -1013,7 +903,7 @@ def get_response(question, db, chat_history, db_uri, cached_schema):
                     else:
                         raise ValueError("Unexpected data format")
                 except Exception as e:
-                    print(f"Error parsing SELECT result: {e}")
+                    print(f"Error parsing result: {e}")
                     output_data = {
                         "type": "error",
                         "message": f"Failed to parse: {str(e)}"
@@ -1057,47 +947,654 @@ def get_response(question, db, chat_history, db_uri, cached_schema):
         sql_query_placeholder = sql_query if 'sql_query' in locals() else 'N/A'
         return f"SQL: `{sql_query_placeholder}`\nOutput: {json.dumps(error_data)}"
 
-# ==================== API ENDPOINTS ====================
+# ============= STARTUP/SHUTDOWN EVENTS =============
+@app.on_event("startup")
+async def startup_event():
+    """Validate environment on startup"""
+    validate_environment()
+    
+    try:
+        import slowapi
+        version = getattr(slowapi, '__version__', 'unknown')
+        logger.info(f"✅ Rate limiting enabled (slowapi v{version})")
+    except ImportError:
+        logger.warning("⚠️ slowapi not installed - rate limiting will not work!")
+    except Exception as e:
+        logger.warning(f"⚠️ Rate limiting may not be working: {e}")
+    
+    logger.info("🚀 Application started successfully with MySQL & PostgreSQL support")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on shutdown"""
+    logger.info("🛑 Shutting down application...")
+    
+    # Close all connection pools
+    for db_uri in list(db_pool_manager._pools.keys()):
+        db_pool_manager.clear_pool(db_uri)
+    
+    # Clear all caches
+    schema_cache._cache.clear()
+    query_cache.clear()
+    
+    logger.info("✅ Cleanup completed")
+
+# ============= API ENDPOINTS =============
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "database_connected": hasattr(app.state, "db_uri"),
+        "database_type": db_pool_manager.get_db_type(app.state.db_uri) if hasattr(app.state, "db_uri") else None,
+        "cache_stats": {
+            "schema_cache": len(schema_cache._cache),
+            "query_cache": len(query_cache._cache),
+            "connection_pools": len(db_pool_manager._pools)
+        }
+    }
+
+@app.post("/api/list-databases")
+@limiter.limit("20/minute")
+async def list_databases(
+    request: Request,
+    creds: DBCredentials
+):
+    """✨ NEW: List databases with support for both MySQL and PostgreSQL"""
+    print(f"[LIST DB] Request: host={creds.host}, port={creds.port}, user={creds.user}, type={creds.db_type}")
+    
+    try:
+        # Build connection URI based on database type
+        db_uri = build_db_uri(creds)
+        
+        # Create temporary engine
+        temp_engine = create_engine(
+            db_uri,
+            poolclass=pool.NullPool,
+            echo=False
+        )
+        
+        # Get database-specific query
+        list_query, system_dbs = get_list_databases_query(creds.db_type)
+        
+        # Execute query
+        with temp_engine.connect() as conn:
+            result = conn.execute(text(list_query))
+            databases = [row[0] for row in result]
+            
+            # Filter out system databases
+            user_databases = [db for db in databases if db not in system_dbs]
+        
+        temp_engine.dispose()
+        
+        print(f"[LIST DB] Found {len(user_databases)} user databases ({creds.db_type})")
+        return {
+            "success": True,
+            "databases": user_databases,
+            "db_type": creds.db_type,
+            "message": f"Found {len(user_databases)} database(s)"
+        }
+    
+    except OperationalError as e:
+        error_msg = str(e)
+        print(f"[LIST DB] OperationalError: {error_msg}")
+        
+        if "Access denied" in error_msg or "1045" in error_msg or "authentication failed" in error_msg.lower():
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "success": False,
+                    "error": "Authentication Failed",
+                    "message": f"Invalid username or password for the {creds.db_type.upper()} server.",
+                    "code": "AUTH_FAILED"
+                }
+            )
+        elif "Can't connect" in error_msg or "Connection refused" in error_msg or "could not connect" in error_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "success": False,
+                    "error": "Connection Refused",
+                    "message": f"Cannot connect to {creds.db_type.upper()} server at {creds.host}:{creds.port}.",
+                    "code": "CONNECTION_REFUSED"
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "success": False,
+                    "error": "Connection Failed",
+                    "message": error_msg,
+                    "code": "CONNECTION_ERROR"
+                }
+            )
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[LIST DB] Unexpected error: {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "success": False,
+                "error": "Unknown Error",
+                "message": error_msg,
+                "code": "UNKNOWN_ERROR"
+            }
+        )
+
+@app.post("/api/create-database")
+@limiter.limit("10/hour")
+async def create_database(
+    request: Request,
+    config: DBCreate
+):
+    """✨ NEW: Create database with support for both MySQL and PostgreSQL"""
+    print(f"[CREATE DB] Request to create {config.db_type} database: {config.database_name}")
+    
+    try:
+        # Validate database name (alphanumeric and underscores only)
+        if not re.match(r'^[a-zA-Z0-9_]+$', config.database_name):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "error": "Invalid Database Name",
+                    "message": "Database name can only contain letters, numbers, and underscores.",
+                    "code": "INVALID_NAME"
+                }
+            )
+        
+        # Check length
+        if len(config.database_name) > 63:  # PostgreSQL limit is 63, MySQL is 64
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "error": "Name Too Long",
+                    "message": "Database name must be 63 characters or less.",
+                    "code": "NAME_TOO_LONG"
+                }
+            )
+        
+        # Build connection URI
+        db_uri = build_db_uri(config)
+        
+        # Create temporary engine
+        temp_engine = create_engine(
+            db_uri,
+            poolclass=pool.NullPool,
+            echo=False
+        )
+        
+        # Get database-specific queries
+        list_query, system_dbs = get_list_databases_query(config.db_type)
+        create_query = get_create_database_query(config.db_type, config.database_name)
+        
+        # Check if database exists and create
+        with temp_engine.connect() as conn:
+            # Check existing databases
+            result = conn.execute(text(list_query))
+            existing_databases = [row[0] for row in result]
+            
+            if config.database_name in existing_databases:
+                temp_engine.dispose()
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "success": False,
+                        "error": "Database Already Exists",
+                        "message": f"Database '{config.database_name}' already exists.",
+                        "code": "DATABASE_EXISTS"
+                    }
+                )
+            
+            # Create the database
+            # For PostgreSQL, we need to commit outside of transaction
+            if config.db_type == DatabaseType.POSTGRESQL:
+                conn.execute(text("COMMIT"))
+                conn.execute(text(create_query))
+            else:
+                conn.execute(text(create_query))
+                conn.commit()
+        
+        temp_engine.dispose()
+        
+        print(f"[CREATE DB] Successfully created {config.db_type} database: {config.database_name}")
+        return {
+            "success": True,
+            "database_name": config.database_name,
+            "db_type": config.db_type,
+            "message": f"Database '{config.database_name}' created successfully"
+        }
+    
+    except HTTPException as e:
+        raise e
+    
+    except OperationalError as e:
+        error_msg = str(e)
+        print(f"[CREATE DB] OperationalError: {error_msg}")
+        
+        if "Access denied" in error_msg or "1044" in error_msg or "permission denied" in error_msg.lower():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "success": False,
+                    "error": "Permission Denied",
+                    "message": f"Your {config.db_type.upper()} user does not have permission to create databases.",
+                    "code": "PERMISSION_DENIED"
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "success": False,
+                    "error": "Database Creation Failed",
+                    "message": error_msg,
+                    "code": "CREATION_ERROR"
+                }
+            )
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[CREATE DB] Unexpected error: {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "success": False,
+                "error": "Unknown Error",
+                "message": error_msg,
+                "code": "UNKNOWN_ERROR"
+            }
+        )
+
+@app.post("/api/connect")
+@limiter.limit("20/minute")
+async def connect_db(
+    request: Request,
+    config: DBSelection
+):
+    """✨ NEW: Connect to database with support for both MySQL and PostgreSQL"""
+    print(f"[CONNECT] Request: host={config.host}, port={config.port}, user={config.user}, database={config.database}, type={config.db_type}")
+    
+    try:
+        # Build connection URI
+        db_uri = build_db_uri(config, config.database)
+        
+        # Use connection pool manager
+        test_engine = db_pool_manager.get_engine(db_uri, config.db_type)
+        
+        # Test connection
+        with test_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        
+        # Get pooled SQLDatabase instance
+        test_db = db_pool_manager.get_db(db_uri, config.db_type)
+        
+        # Pre-fetch and cache schema
+        schema_cache.get_schema(db_uri, test_db)
+        
+        # Store in app state
+        app.state.db_uri = db_uri
+        app.state.db_name = config.database
+        app.state.db_type = config.db_type
+        
+        print(f"✅ {config.db_type.upper()} database connected with connection pooling and schema cached")
+        return {
+            "success": True,
+            "message": f"{config.db_type.upper()} database connected successfully",
+            "database": config.database,
+            "db_type": config.db_type
+        }
+    
+    except ProgrammingError as e:
+        error_msg = str(e)
+        print(f"[CONNECT] ProgrammingError: {error_msg}")
+        
+        if "Unknown database" in error_msg or "1049" in error_msg or "does not exist" in error_msg.lower():
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "success": False,
+                    "error": "Database Not Found",
+                    "message": f"The database '{config.database}' does not exist on the {config.db_type.upper()} server.",
+                    "suggestion": f"Please create the database first.",
+                    "code": "DATABASE_NOT_FOUND"
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "error": "SQL Programming Error",
+                    "message": error_msg,
+                    "code": "SQL_ERROR"
+                }
+            )
+    
+    except OperationalError as e:
+        error_msg = str(e)
+        print(f"[CONNECT] OperationalError: {error_msg}")
+        
+        if "Access denied" in error_msg or "1045" in error_msg or "authentication failed" in error_msg.lower():
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "success": False,
+                    "error": "Authentication Failed",
+                    "message": f"Invalid username or password for the {config.db_type.upper()} server.",
+                    "suggestion": f"Please verify your {config.db_type.upper()} username and password.",
+                    "code": "AUTH_FAILED"
+                }
+            )
+        
+        elif "Can't connect" in error_msg or "Connection refused" in error_msg or "2003" in error_msg or "could not connect" in error_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "success": False,
+                    "error": "Connection Refused",
+                    "message": f"Cannot connect to {config.db_type.upper()} server at {config.host}:{config.port}.",
+                    "suggestion": f"Please verify the host and port are correct and the {config.db_type.upper()} server is running.",
+                    "code": "CONNECTION_REFUSED"
+                }
+            )
+        
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "success": False,
+                    "error": "Connection Failed",
+                    "message": error_msg,
+                    "suggestion": "Please check your connection parameters and try again.",
+                    "code": "CONNECTION_ERROR"
+                }
+            )
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[CONNECT] Unexpected error: {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "success": False,
+                "error": "Unknown Error",
+                "message": error_msg,
+                "suggestion": "An unexpected error occurred. Please check your configuration and try again.",
+                "code": "UNKNOWN_ERROR"
+            }
+        )
+
+@app.post("/api/disconnect")
+async def disconnect_db():
+    """Disconnect from database and clear caches"""
+    if hasattr(app.state, "db_uri"):
+        db_uri = app.state.db_uri
+        db_type = app.state.db_type if hasattr(app.state, "db_type") else "unknown"
+        
+        # Clear connection pool
+        db_pool_manager.clear_pool(db_uri)
+        
+        # Clear caches
+        schema_cache.invalidate(db_uri)
+        query_cache.clear()
+        
+        delattr(app.state, "db_uri")
+        if hasattr(app.state, "db_name"):
+            delattr(app.state, "db_name")
+        if hasattr(app.state, "db_type"):
+            delattr(app.state, "db_type")
+        
+        print(f"✅ {db_type.upper()} database disconnected, connection pool cleared, caches invalidated")
+        return {"success": True, "message": "Database disconnected successfully"}
+    return {"success": False, "message": "No database connection to disconnect"}
+
+@app.get("/api/tables")
+@limiter.limit("30/minute")
+async def get_all_tables(request: Request):
+    """✨ UPDATED: Get list of tables with database-type awareness"""
+    if not hasattr(app.state, "db_uri"):
+        raise HTTPException(status_code=400, detail="Database not connected")
+    
+    try:
+        db_type = db_pool_manager.get_db_type(app.state.db_uri)
+        engine = db_pool_manager.get_engine(app.state.db_uri)
+        
+        # Get tables based on database type
+        if db_type == DatabaseType.POSTGRESQL:
+            with engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT tablename 
+                    FROM pg_catalog.pg_tables 
+                    WHERE schemaname != 'pg_catalog' 
+                    AND schemaname != 'information_schema'
+                    ORDER BY tablename
+                """))
+                tables = [row[0] for row in result]
+        else:  # MySQL
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+        
+        print(f"[GET TABLES] Retrieved {len(tables)} tables from {db_type}")
+        
+        return {
+            "success": True,
+            "tables": tables,
+            "count": len(tables),
+            "database": app.state.db_name if hasattr(app.state, 'db_name') else 'unknown',
+            "db_type": db_type
+        }
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[GET TABLES ERROR] {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve tables: {error_msg}"
+        )
+
+@app.get("/api/table-schema/{table_name}")
+@limiter.limit("30/minute")
+async def get_table_schema(
+    request: Request,
+    table_name: str
+):
+    """Get schema for a specific table (works for both MySQL and PostgreSQL)"""
+    if not hasattr(app.state, "db_uri"):
+        raise HTTPException(status_code=400, detail="Database not connected")
+    
+    try:
+        engine = db_pool_manager.get_engine(app.state.db_uri)
+        inspector = inspect(engine)
+        
+        # Check if table exists
+        if table_name not in inspector.get_table_names():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table '{table_name}' not found"
+            )
+        
+        columns = inspector.get_columns(table_name)
+
+        # Get Primary key constraints
+        pk_constraint = inspector.get_pk_constraint(table_name)
+        primary_keys = pk_constraint.get('constrained_columns', []) if pk_constraint else []
+
+        fk_constraints = inspector.get_foreign_keys(table_name)
+        foreign_keys = []
+        for fk in fk_constraints:
+            foreign_keys.extend(fk.get('constrained_columns', []))
+        
+        # Get unique constraints
+        unique_constraints = inspector.get_unique_constraints(table_name)
+        unique_columns = []
+        for uc in unique_constraints:
+            unique_columns.extend(uc.get('column_names', []))
+        
+        schema_info = []
+        for col in columns:
+            col_name = col['name']
+            
+            # Determine key type
+            key = None
+            if col_name in primary_keys:
+                key = 'PRI'
+            elif col_name in foreign_keys:
+                key = 'MUL'
+            elif col_name in unique_columns:
+                key = 'UNI'
+            
+            schema_info.append({
+                'name': col_name,
+                'type': str(col['type']),
+                'nullable': col.get('nullable', True),
+                'key': key,
+                'default': str(col['default']) if col.get('default') is not None else None,
+                'autoincrement': col.get('autoincrement', False)
+            })
+        
+        print(f"[GET SCHEMA] Retrieved schema for table '{table_name}': {len(schema_info)} columns")
+        
+        return {
+            "success": True,
+            "table_name": table_name,
+            "columns": schema_info,
+            "column_count": len(schema_info)
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[GET SCHEMA ERROR] Failed to get schema for '{table_name}': {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve table schema: {error_msg}"
+        )
+
+@app.post("/api/chat")
+@limiter.limit("30/minute")
+async def chat_endpoint(
+    request: Request,
+    chat_request: ChatRequest
+):
+    """✨ UPDATED: Chat endpoint with database-type awareness"""
+    if not hasattr(app.state, "db_uri"):
+        raise HTTPException(status_code=400, detail="Database not connected")
+    
+    chat_history = [
+        AIMessage(content=msg["content"]) if msg["role"] == "ai"
+        else HumanMessage(content=msg["content"])
+        for msg in chat_request.chat_history
+    ]
+    
+    try:
+        # Get database type
+        db_type = db_pool_manager.get_db_type(app.state.db_uri) or app.state.db_type
+        
+        # Use pooled database connection
+        db = db_pool_manager.get_db(app.state.db_uri, db_type)
+        
+        # Get cached schema
+        cached_schema = schema_cache.get_schema(app.state.db_uri, db)
+        
+        # Get response with database-aware handling
+        response = get_response(
+            chat_request.question,
+            db,
+            chat_history,
+            app.state.db_uri,
+            cached_schema,
+            db_type
+        )
+        
+        return {"success": True, "response": response}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"Chat error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+@app.post("/api/confirm-sql")
+@limiter.limit("20/minute")
+async def confirm_sql_action(
+    request: Request,
+    req: ConfirmSQLRequest
+):
+    """Confirm and execute dangerous SQL"""
+    if not req.confirm:
+        return {
+            "type": "status",
+            "message": "SQL execution cancelled by user"
+        }
+    
+    try:
+        if not hasattr(app.state, "db_uri"):
+            raise HTTPException(status_code=400, detail="Database not connected")
+
+        db_type = db_pool_manager.get_db_type(app.state.db_uri)
+        db = db_pool_manager.get_db(app.state.db_uri, db_type)
+        result = db.run(req.sql)
+        
+        schema_cache.invalidate(app.state.db_uri)
+        query_cache.clear()
+        
+        return {
+            "type": "status",
+            "message": f"SQL executed successfully. Result: {result}"
+        }
+    except Exception as e:
+        return {
+            "type": "error",
+            "message": str(e)
+        }
+
+# ============= USER MANAGEMENT ENDPOINTS (Same as before) =============
 
 @app.post("/api/send-otp")
-@limiter.limit("3/minute")  
+@limiter.limit("3/minute")
 async def send_otp_for_signup(
-    request: Request,  
-    otp_request: OtpRequest,  
+    request: Request,
+    otp_request: OtpRequest,
     db: Session = Depends(get_db)
 ):
-    """Send OTP - Now stored in database (Rate limited: 3 requests per minute)"""
+    """Send OTP - Now stored in database"""
     otp = generate_otp()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
     
     db.query(OTP).filter(OTP.email == otp_request.email).delete()
     
     db_otp = OTP(
-        email=otp_request.email,  
+        email=otp_request.email,
         otp=otp,
         expires_at=expires_at
     )
     db.add(db_otp)
     db.commit()
     
-    email_sent = send_otp_email(otp_request.email, otp)  
+    email_sent = send_otp_email(otp_request.email, otp)
     
     if email_sent:
         message = "OTP has been sent to your email."
     else:
         message = "Email unavailable; check server logs for OTP."
     
-    print(f"[OTP] Generated OTP for {otp_request.email}: {otp}")  
+    print(f"[OTP] Generated OTP for {otp_request.email}: {otp}")
     return {"success": True, "message": message}
 
 @app.post("/api/signup", status_code=201)
-@limiter.limit("5/hour")  
+@limiter.limit("5/hour")
 async def signup_user(
-    request: Request,  
-    user: UserCreate, 
+    request: Request,
+    user: UserCreate,
     db: Session = Depends(get_db)
 ):
-    """Register new user - OTP verified from database (Rate limited: 5 signups per hour)"""
+    """Register new user - OTP verified from database"""
     stored_otp = db.query(OTP).filter(OTP.email == user.email).first()
     
     if not stored_otp:
@@ -1145,13 +1642,13 @@ async def signup_user(
     return {"success": True, "message": "User created successfully"}
 
 @app.post("/api/login")
-@limiter.limit("10/minute")  
+@limiter.limit("10/minute")
 async def login_for_access_token(
-    request: Request,  
-    form_data: UserLogin, 
+    request: Request,
+    form_data: UserLogin,
     db: Session = Depends(get_db)
 ):
-    """Login with email or username (Rate limited: 10 attempts per minute)"""
+    """Login with email or username"""
     user = get_user(form_data.identifier, db)
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect email/username or password")
@@ -1170,560 +1667,19 @@ async def login_for_access_token(
         }
     }
 
-@app.post("/api/list-databases")
-@limiter.limit("20/minute") 
-async def list_databases(
-    request: Request, 
-    creds: DBCredentials
-):
-    """Step 1: Verify credentials and return list of available databases (Rate limited: 20 requests per minute)"""
-    print(f"[LIST DB] Received request: host={creds.host}, port={creds.port}, user={creds.user}")
-    
-    try:
-        # Connect to MySQL server without specifying database
-        db_uri = f"mysql+mysqlconnector://{creds.user}:{quote_plus(creds.password)}@{creds.host}:{creds.port}"
-        
-        # Create temporary engine
-        temp_engine = create_engine(
-            db_uri,
-            poolclass=pool.NullPool,  
-            echo=False
-        )
-        
-        # Test connection and get databases
-        with temp_engine.connect() as conn:
-            result = conn.execute(text("SHOW DATABASES"))
-            databases = [row[0] for row in result]
-            
-            # Filter out system databases
-            system_dbs = ['information_schema', 'mysql', 'performance_schema', 'sys']
-            user_databases = [db for db in databases if db not in system_dbs]
-        
-        temp_engine.dispose()
-        
-        print(f"[LIST DB] Found {len(user_databases)} user databases")
-        return {
-            "success": True,
-            "databases": user_databases,
-            "message": f"Found {len(user_databases)} database(s)"
-        }
-    
-    except OperationalError as e:
-        error_msg = str(e)
-        print(f"[LIST DB] OperationalError: {error_msg}")
-        
-        if "Access denied" in error_msg or "1045" in error_msg:
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "success": False,
-                    "error": "Authentication Failed",
-                    "message": "Invalid username or password for the MySQL server.",
-                    "code": "AUTH_FAILED"
-                }
-            )
-        elif "Can't connect" in error_msg or "Connection refused" in error_msg:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "success": False,
-                    "error": "Connection Refused",
-                    "message": f"Cannot connect to MySQL server at {creds.host}:{creds.port}.",
-                    "code": "CONNECTION_REFUSED"
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "success": False,
-                    "error": "Connection Failed",
-                    "message": error_msg,
-                    "code": "CONNECTION_ERROR"
-                }
-            )
-    
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[LIST DB] Unexpected error: {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "success": False,
-                "error": "Unknown Error",
-                "message": error_msg,
-                "code": "UNKNOWN_ERROR"
-            }
-        )
-
-@app.post("/api/create-database")
-@limiter.limit("10/hour") 
-async def create_database(
-    request: Request,  
-    config: DBCreate
-):
-    """Create a new database on the MySQL server (Rate limited: 10 creations per hour)"""
-    print(f"[CREATE DB] Request to create database: {config.database_name}")
-    
-    try:
-        # Validate database name (alphanumeric and underscores only)
-        if not re.match(r'^[a-zA-Z0-9_]+$', config.database_name):
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "success": False,
-                    "error": "Invalid Database Name",
-                    "message": "Database name can only contain letters, numbers, and underscores.",
-                    "code": "INVALID_NAME"
-                }
-            )
-        
-        # Check if database name is too long
-        if len(config.database_name) > 64:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "success": False,
-                    "error": "Name Too Long",
-                    "message": "Database name must be 64 characters or less.",
-                    "code": "NAME_TOO_LONG"
-                }
-            )
-        
-        # Connect to MySQL server without specifying database
-        db_uri = f"mysql+mysqlconnector://{config.user}:{quote_plus(config.password)}@{config.host}:{config.port}"
-        
-        # Create temporary engine
-        temp_engine = create_engine(
-            db_uri,
-            poolclass=pool.NullPool,
-            echo=False
-        )
-        
-        # Create the database
-        with temp_engine.connect() as conn:
-            # Check if database already exists
-            result = conn.execute(text("SHOW DATABASES"))
-            existing_databases = [row[0] for row in result]
-            
-            if config.database_name in existing_databases:
-                temp_engine.dispose()
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "success": False,
-                        "error": "Database Already Exists",
-                        "message": f"Database '{config.database_name}' already exists.",
-                        "code": "DATABASE_EXISTS"
-                    }
-                )
-            
-            # Create the database
-            conn.execute(text(f"CREATE DATABASE `{config.database_name}`"))
-            conn.commit()
-        
-        temp_engine.dispose()
-        
-        print(f"[CREATE DB] Successfully created database: {config.database_name}")
-        return {
-            "success": True,
-            "database_name": config.database_name,
-            "message": f"Database '{config.database_name}' created successfully"
-        }
-    
-    except HTTPException as e:
-        raise e
-    
-    except OperationalError as e:
-        error_msg = str(e)
-        print(f"[CREATE DB] OperationalError: {error_msg}")
-        
-        if "Access denied" in error_msg or "1044" in error_msg:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "success": False,
-                    "error": "Permission Denied",
-                    "message": "Your MySQL user does not have permission to create databases.",
-                    "code": "PERMISSION_DENIED"
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "success": False,
-                    "error": "Database Creation Failed",
-                    "message": error_msg,
-                    "code": "CREATION_ERROR"
-                }
-            )
-    
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[CREATE DB] Unexpected error: {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "success": False,
-                "error": "Unknown Error",
-                "message": error_msg,
-                "code": "UNKNOWN_ERROR"
-            }
-        )
-    
-@app.post("/api/connect")
-@limiter.limit("20/minute") 
-async def connect_db(
-    request: Request,  
-    config: DBSelection
-):
-    """Connect to MySQL database with connection pooling (Rate limited: 20 requests per minute)"""
-    print(f"Received connect request: host={config.host}, port={config.port}, user={config.user}, database={config.database}")
-    
-    try:
-        db_uri = f"mysql+mysqlconnector://{config.user}:{quote_plus(config.password)}@{config.host}:{config.port}/{config.database}"
-        
-        # ✅ Use connection pool manager
-        test_engine = db_pool_manager.get_engine(db_uri)
-        
-        with test_engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        
-        # ✅ Get pooled SQLDatabase instance
-        test_db = db_pool_manager.get_db(db_uri)
-        
-        # ✅ Pre-fetch and cache schema
-        schema_cache.get_schema(db_uri, test_db)
-        
-        app.state.db_uri = db_uri
-        app.state.db_name = config.database
-        
-        print("✅ Database connected with connection pooling and schema cached")
-        return {"success": True, "message": "Database connected successfully"}
-    
-    except ProgrammingError as e:
-        error_msg = str(e)
-        print(f"ProgrammingError: {error_msg}")
-        
-        if "Unknown database" in error_msg or "1049" in error_msg:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "success": False,
-                    "error": "Database Not Found",
-                    "message": f"The database '{config.database}' does not exist on the MySQL server.",
-                    "suggestion": f"Please create the database first using: CREATE DATABASE `{config.database}`;",
-                    "code": "DATABASE_NOT_FOUND"
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "success": False,
-                    "error": "SQL Programming Error",
-                    "message": error_msg,
-                    "code": "SQL_ERROR"
-                }
-            )
-    
-    except OperationalError as e:
-        error_msg = str(e)
-        print(f"OperationalError: {error_msg}")
-        
-        if "Access denied" in error_msg or "1045" in error_msg:
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "success": False,
-                    "error": "Authentication Failed",
-                    "message": "Invalid username or password for the MySQL server.",
-                    "suggestion": "Please verify your MySQL username and password.",
-                    "code": "AUTH_FAILED"
-                }
-            )
-        
-        elif "Can't connect" in error_msg or "Connection refused" in error_msg or "2003" in error_msg:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "success": False,
-                    "error": "Connection Refused",
-                    "message": f"Cannot connect to MySQL server at {config.host}:{config.port}.",
-                    "suggestion": "Please verify the host and port are correct and the MySQL server is running.",
-                    "code": "CONNECTION_REFUSED"
-                }
-            )
-        
-        elif "timeout" in error_msg.lower() or "2013" in error_msg or "Lost connection" in error_msg:
-            raise HTTPException(
-                status_code=504,
-                detail={
-                    "success": False,
-                    "error": "Connection Timeout",
-                    "message": "Connection to MySQL server timed out.",
-                    "suggestion": "Please check your network connection and MySQL server status.",
-                    "code": "CONNECTION_TIMEOUT"
-                }
-            )
-        
-        elif "host" in error_msg.lower() and ("unknown" in error_msg.lower() or "not found" in error_msg.lower()):
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "success": False,
-                    "error": "Host Not Found",
-                    "message": f"Cannot resolve hostname '{config.host}'.",
-                    "suggestion": "Please verify the hostname or IP address is correct.",
-                    "code": "HOST_NOT_FOUND"
-                }
-            )
-        
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "success": False,
-                    "error": "Connection Failed",
-                    "message": error_msg,
-                    "suggestion": "Please check your connection parameters and try again.",
-                    "code": "CONNECTION_ERROR"
-                }
-            )
-    
-    except Exception as e:
-        error_msg = str(e)
-        print(f"Unexpected error: {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "success": False,
-                "error": "Unknown Error",
-                "message": error_msg,
-                "suggestion": "An unexpected error occurred. Please check your configuration and try again.",
-                "code": "UNKNOWN_ERROR"
-            }
-        )
-
-@app.post("/api/disconnect")
-async def disconnect_db():
-    """Disconnect from database and clear caches"""
-    if hasattr(app.state, "db_uri"):
-        db_uri = app.state.db_uri
-        
-        # Clear connection pool
-        db_pool_manager.clear_pool(db_uri)
-        
-        # Clear caches
-        schema_cache.invalidate(db_uri)
-        query_cache.clear()
-        
-        delattr(app.state, "db_uri")
-        print("✅ Database disconnected, connection pool cleared, caches invalidated")
-        return {"success": True, "message": "Database disconnected successfully"}
-    return {"success": False, "message": "No database connection to disconnect"}
-
-@app.post("/api/chat")
-@limiter.limit("30/minute")  
-async def chat_endpoint(
-    request: Request, 
-    chat_request: ChatRequest
-):
-    """✅ OPTIMIZED Chat endpoint with connection pooling and caching (Rate limited: 30 queries per minute)"""
-    if not hasattr(app.state, "db_uri"):
-        raise HTTPException(status_code=400, detail="Database not connected")
-    
-    chat_history = [
-        AIMessage(content=msg["content"]) if msg["role"] == "ai"
-        else HumanMessage(content=msg["content"])
-        for msg in chat_request.chat_history  
-    ]
-    
-    try:
-        # ✅ Use pooled database connection
-        db = db_pool_manager.get_db(app.state.db_uri)
-        
-        # ✅ Get cached schema
-        cached_schema = schema_cache.get_schema(app.state.db_uri, db)
-        
-        # ✅ Get response with caching
-        response = get_response(
-            chat_request.question, 
-            db, 
-            chat_history, 
-            app.state.db_uri,
-            cached_schema
-        )
-        
-        return {"success": True, "response": response}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        print(f"Chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
-
-
-@app.get("/api/chat-sessions")
-@limiter.limit("60/minute") 
-async def get_chat_sessions(
-    request: Request, 
-    user_id: int = Query(...)
-):
-    """Get all chat sessions for a specific user (Rate limited: 60 requests per minute)"""
-    db_session = SessionLocal()
-    try:
-        sessions = db_session.query(ChatSession).filter(
-            ChatSession.user_id == user_id
-        ).order_by(ChatSession.id.desc()).all()
-        
-        result = []
-        for session in sessions:
-            result.append({
-                "id": session.id,
-                "user_id": session.user_id,
-                "title": session.title,
-                "messages": json.loads(session.messages),
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-        
-        print(f"[GET SESSIONS] Found {len(result)} sessions for user {user_id}")
-        return result
-    except Exception as e:
-        print(f"[GET SESSIONS ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch chat sessions: {str(e)}")
-    finally:
-        db_session.close()
-
-@app.post("/api/chat-sessions")
-@limiter.limit("30/minute")  
-async def create_chat_session(
-    request: Request, 
-    session: dict
-):
-    """Create a new chat session for a user (Rate limited: 30 creations per minute)"""
-    db_session = SessionLocal()
-    try:
-        if not session.get("user_id"):
-            raise HTTPException(status_code=400, detail="user_id is required")
-        
-        new_session = ChatSession(
-            user_id=session.get("user_id"),
-            title=session.get("title", "Untitled Chat"),
-            messages=json.dumps(session.get("messages", []))
-        )
-        db_session.add(new_session)
-        db_session.commit()
-        db_session.refresh(new_session)
-        
-        print(f"[CREATE SESSION] Created session {new_session.id} for user {new_session.user_id}")
-        
-        return {
-            "id": new_session.id,
-            "user_id": new_session.user_id,
-            "title": new_session.title,
-            "messages": json.loads(new_session.messages),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db_session.rollback()
-        print(f"[CREATE SESSION ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
-    finally:
-        db_session.close()
-
-@app.put("/api/chat-sessions/{session_id}")
-@limiter.limit("60/minute")  
-async def update_chat_session(
-    request: Request, 
-    session_id: int, 
-    session: dict
-):
-    """Update a chat session (with user verification) (Rate limited: 60 updates per minute)"""
-    db_session = SessionLocal()
-    try:
-        existing_session = db_session.query(ChatSession).filter(
-            ChatSession.id == session_id
-        ).first()
-        
-        if not existing_session:
-            raise HTTPException(status_code=404, detail="Chat session not found")
-        
-        if existing_session.user_id != session.get("user_id"):
-            print(f"[UPDATE SESSION] Unauthorized: Session {session_id} belongs to user {existing_session.user_id}, but user {session.get('user_id')} tried to access it")
-            raise HTTPException(status_code=403, detail="Unauthorized to update this session")
-        
-        existing_session.title = session.get("title", existing_session.title)
-        existing_session.messages = json.dumps(session.get("messages", json.loads(existing_session.messages)))
-        db_session.commit()
-        
-        print(f"[UPDATE SESSION] Updated session {session_id} for user {existing_session.user_id}")
-        
-        return {
-            "id": existing_session.id,
-            "user_id": existing_session.user_id,
-            "title": existing_session.title,
-            "messages": json.loads(existing_session.messages),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db_session.rollback()
-        print(f"[UPDATE SESSION ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update chat session: {str(e)}")
-    finally:
-        db_session.close()
-
-@app.delete("/api/chat-sessions/{session_id}")
-@limiter.limit("30/minute") 
-async def delete_chat_session(
-    request: Request, 
-    session_id: int, 
-    user_id: int = Query(...)
-):
-    """Delete a chat session (with user verification) (Rate limited: 30 deletions per minute)"""
-    db_session = SessionLocal()
-    try:
-        session = db_session.query(ChatSession).filter(
-            ChatSession.id == session_id
-        ).first()
-        
-        if not session:
-            print(f"[DELETE SESSION] Session {session_id} not found, returning success (already deleted)")
-            return {"success": True, "message": "Chat session not found or already deleted"}
-        
-        if session.user_id != user_id:
-            print(f"[DELETE SESSION] Unauthorized: Session {session_id} belongs to user {session.user_id}, but user {user_id} tried to delete it")
-            raise HTTPException(status_code=403, detail="Unauthorized to delete this session")
-        
-        db_session.delete(session)
-        db_session.commit()
-        
-        print(f"[DELETE SESSION] Successfully deleted session {session_id} for user {user_id}")
-        
-        return {"success": True, "message": "Chat session deleted"}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db_session.rollback()
-        print(f"[DELETE SESSION ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete chat session: {str(e)}")
-    finally:
-        db_session.close()
+# [Continue with remaining endpoints: forgot-password, reset-password, chat-sessions, etc.]
+# These remain the same as in your original code...
 
 @app.post("/api/forgot-password")
-@limiter.limit("3/minute")  
+@limiter.limit("3/minute")
 async def forgot_password(
-    request: Request,  
-    forgot_request: ForgotPasswordRequest,  
+    request: Request,
+    forgot_request: ForgotPasswordRequest,
     db: Session = Depends(get_db)
 ):
-    """Send OTP for password reset (Rate limited: 3 requests per minute)"""
+    """Send OTP for password reset"""
     try:
-        user = db.query(User).filter(User.email == forgot_request.email).first() 
+        user = db.query(User).filter(User.email == forgot_request.email).first()
         if not user:
             return {
                 "success": True,
@@ -1733,24 +1689,24 @@ async def forgot_password(
         otp = generate_otp()
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
         
-        db.query(PasswordResetOTP).filter(PasswordResetOTP.email == forgot_request.email).delete()  
+        db.query(PasswordResetOTP).filter(PasswordResetOTP.email == forgot_request.email).delete()
         
         db_otp = PasswordResetOTP(
-            email=forgot_request.email, 
+            email=forgot_request.email,
             otp=otp,
             expires_at=expires_at
         )
         db.add(db_otp)
         db.commit()
         
-        email_sent = send_password_reset_email(forgot_request.email, otp) 
+        email_sent = send_password_reset_email(forgot_request.email, otp)
         
         if email_sent:
             message = "Password reset code has been sent to your email."
         else:
             message = "Email unavailable; check server logs for reset code."
         
-        print(f"[PASSWORD RESET] Generated OTP for {forgot_request.email}: {otp}")  
+        print(f"[PASSWORD RESET] Generated OTP for {forgot_request.email}: {otp}")
         
         return {
             "success": True,
@@ -1765,16 +1721,16 @@ async def forgot_password(
         )
 
 @app.post("/api/verify-reset-otp")
-@limiter.limit("5/minute")  
+@limiter.limit("5/minute")
 async def verify_reset_otp(
-    request: Request,  
-    verify_request: dict, 
+    request: Request,
+    verify_request: dict,
     db: Session = Depends(get_db)
 ):
-    """Verify OTP for password reset (Rate limited: 5 attempts per minute)"""
+    """Verify OTP for password reset"""
     try:
-        email = verify_request.get("email")  
-        otp = verify_request.get("otp")  
+        email = verify_request.get("email")
+        otp = verify_request.get("otp")
         
         if not email or not otp:
             raise HTTPException(status_code=400, detail="Email and OTP are required")
@@ -1816,17 +1772,18 @@ async def verify_reset_otp(
             status_code=500,
             detail="Failed to verify reset code. Please try again."
         )
+
 @app.post("/api/reset-password")
-@limiter.limit("5/minute") 
+@limiter.limit("5/minute")
 async def reset_password(
-    request: Request, 
-    reset_request: ResetPasswordRequest,  
+    request: Request,
+    reset_request: ResetPasswordRequest,
     db: Session = Depends(get_db)
 ):
-    """Reset password with OTP verification (Rate limited: 5 attempts per minute)"""
+    """Reset password with OTP verification"""
     try:
         stored_otp = db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == reset_request.email 
+            PasswordResetOTP.email == reset_request.email
         ).first()
         
         if not stored_otp:
@@ -1846,26 +1803,26 @@ async def reset_password(
                 detail="Reset code has expired."
             )
         
-        if stored_otp.otp != reset_request.otp: 
+        if stored_otp.otp != reset_request.otp:
             raise HTTPException(status_code=400, detail="Invalid reset code.")
         
-        user = db.query(User).filter(User.email == reset_request.email).first()  # ✅ CHANGE
+        user = db.query(User).filter(User.email == reset_request.email).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found.")
         
-        if len(reset_request.new_password) < 8: 
+        if len(reset_request.new_password) < 8:
             raise HTTPException(
                 status_code=400,
                 detail="Password must be at least 8 characters long."
             )
         
-        user.hashed_password = get_password_hash(reset_request.new_password)  # ✅ CHANGE
+        user.hashed_password = get_password_hash(reset_request.new_password)
         
         db.delete(stored_otp)
         
         db.commit()
         
-        print(f"[PASSWORD RESET] Password reset successful for {reset_request.email}")  # ✅ CHANGE
+        print(f"[PASSWORD RESET] Password reset successful for {reset_request.email}")
         
         return {
             "success": True,
@@ -1882,17 +1839,16 @@ async def reset_password(
             detail="Failed to reset password. Please try again."
         )
 
-
 @app.post("/api/resend-reset-otp")
-@limiter.limit("3/minute")  
+@limiter.limit("3/minute")
 async def resend_reset_otp(
-    request: Request, 
-    resend_request: ForgotPasswordRequest,  
+    request: Request,
+    resend_request: ForgotPasswordRequest,
     db: Session = Depends(get_db)
 ):
-    """Resend OTP for password reset (Rate limited: 3 requests per minute)"""
+    """Resend OTP for password reset"""
     try:
-        user = db.query(User).filter(User.email == resend_request.email).first()  
+        user = db.query(User).filter(User.email == resend_request.email).first()
         if not user:
             return {
                 "success": True,
@@ -1900,7 +1856,7 @@ async def resend_reset_otp(
             }
         
         existing_otp = db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == resend_request.email  
+            PasswordResetOTP.email == resend_request.email
         ).first()
         
         if existing_otp:
@@ -1918,20 +1874,20 @@ async def resend_reset_otp(
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
         
         db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == resend_request.email  
+            PasswordResetOTP.email == resend_request.email
         ).delete()
         
         db_otp = PasswordResetOTP(
-            email=resend_request.email,  
+            email=resend_request.email,
             otp=otp,
             expires_at=expires_at
         )
         db.add(db_otp)
         db.commit()
         
-        email_sent = send_password_reset_email(resend_request.email, otp) 
+        email_sent = send_password_reset_email(resend_request.email, otp)
         
-        print(f"[RESEND OTP] New OTP for {resend_request.email}: {otp}") 
+        print(f"[RESEND OTP] New OTP for {resend_request.email}: {otp}")
         
         return {
             "success": True,
@@ -1944,6 +1900,156 @@ async def resend_reset_otp(
             status_code=500,
             detail="Failed to resend reset code. Please try again."
         )
+
+@app.get("/api/chat-sessions")
+@limiter.limit("60/minute")
+async def get_chat_sessions(
+    request: Request,
+    user_id: int = Query(...)
+):
+    """Get all chat sessions for a specific user"""
+    db_session = SessionLocal()
+    try:
+        sessions = db_session.query(ChatSession).filter(
+            ChatSession.user_id == user_id
+        ).order_by(ChatSession.id.desc()).all()
+        
+        result = []
+        for session in sessions:
+            result.append({
+                "id": session.id,
+                "user_id": session.user_id,
+                "title": session.title,
+                "messages": json.loads(session.messages),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+        
+        print(f"[GET SESSIONS] Found {len(result)} sessions for user {user_id}")
+        return result
+    except Exception as e:
+        print(f"[GET SESSIONS ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch chat sessions: {str(e)}")
+    finally:
+        db_session.close()
+
+@app.post("/api/chat-sessions")
+@limiter.limit("30/minute")
+async def create_chat_session(
+    request: Request,
+    session: dict
+):
+    """Create a new chat session for a user"""
+    db_session = SessionLocal()
+    try:
+        if not session.get("user_id"):
+            raise HTTPException(status_code=400, detail="user_id is required")
+        
+        new_session = ChatSession(
+            user_id=session.get("user_id"),
+            title=session.get("title", "Untitled Chat"),
+            messages=json.dumps(session.get("messages", []))
+        )
+        db_session.add(new_session)
+        db_session.commit()
+        db_session.refresh(new_session)
+        
+        print(f"[CREATE SESSION] Created session {new_session.id} for user {new_session.user_id}")
+        
+        return {
+            "id": new_session.id,
+            "user_id": new_session.user_id,
+            "title": new_session.title,
+            "messages": json.loads(new_session.messages),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db_session.rollback()
+        print(f"[CREATE SESSION ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
+    finally:
+        db_session.close()
+
+@app.put("/api/chat-sessions/{session_id}")
+@limiter.limit("60/minute")
+async def update_chat_session(
+    request: Request,
+    session_id: int,
+    session: dict
+):
+    """Update a chat session (with user verification)"""
+    db_session = SessionLocal()
+    try:
+        existing_session = db_session.query(ChatSession).filter(
+            ChatSession.id == session_id
+        ).first()
+        
+        if not existing_session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        
+        if existing_session.user_id != session.get("user_id"):
+            print(f"[UPDATE SESSION] Unauthorized: Session {session_id} belongs to user {existing_session.user_id}, but user {session.get('user_id')} tried to access it")
+            raise HTTPException(status_code=403, detail="Unauthorized to update this session")
+        
+        existing_session.title = session.get("title", existing_session.title)
+        existing_session.messages = json.dumps(session.get("messages", json.loads(existing_session.messages)))
+        db_session.commit()
+        
+        print(f"[UPDATE SESSION] Updated session {session_id} for user {existing_session.user_id}")
+        
+        return {
+            "id": existing_session.id,
+            "user_id": existing_session.user_id,
+            "title": existing_session.title,
+            "messages": json.loads(existing_session.messages),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db_session.rollback()
+        print(f"[UPDATE SESSION ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update chat session: {str(e)}")
+    finally:
+        db_session.close()
+
+@app.delete("/api/chat-sessions/{session_id}")
+@limiter.limit("30/minute")
+async def delete_chat_session(
+    request: Request,
+    session_id: int,
+    user_id: int = Query(...)
+):
+    """Delete a chat session (with user verification)"""
+    db_session = SessionLocal()
+    try:
+        session = db_session.query(ChatSession).filter(
+            ChatSession.id == session_id
+        ).first()
+        
+        if not session:
+            print(f"[DELETE SESSION] Session {session_id} not found, returning success (already deleted)")
+            return {"success": True, "message": "Chat session not found or already deleted"}
+        
+        if session.user_id != user_id:
+            print(f"[DELETE SESSION] Unauthorized: Session {session_id} belongs to user {session.user_id}, but user {user_id} tried to delete it")
+            raise HTTPException(status_code=403, detail="Unauthorized to delete this session")
+        
+        db_session.delete(session)
+        db_session.commit()
+        
+        print(f"[DELETE SESSION] Successfully deleted session {session_id} for user {user_id}")
+        
+        return {"success": True, "message": "Chat session deleted"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db_session.rollback()
+        print(f"[DELETE SESSION ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete chat session: {str(e)}")
+    finally:
+        db_session.close()
 
 @app.post("/api/send-email-change-otp")
 @limiter.limit("3/minute")
@@ -2061,7 +2167,6 @@ async def update_email_with_otp(
         db.rollback()
         print(f"[EMAIL UPDATE ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update email")
-    
 
 @app.put("/api/update-profile")
 @limiter.limit("10/minute")
@@ -2070,7 +2175,7 @@ async def update_profile(
     profile_request: UpdateProfileRequest,
     db: Session = Depends(get_db)
 ):
-    """Update user profile (Rate limited: 10 updates per minute)"""
+    """Update user profile"""
     try:
         # Get the user
         user = db.query(User).filter(User.id == profile_request.userId).first()
@@ -2140,6 +2245,7 @@ async def update_profile(
             status_code=500,
             detail="Failed to update profile. Please try again."
         )
+
 @app.post("/api/change-password")
 @limiter.limit("5/minute")
 async def change_password(
@@ -2147,7 +2253,7 @@ async def change_password(
     password_request: ChangePasswordRequest,
     db: Session = Depends(get_db)
 ):
-    """Change user password (Rate limited: 5 attempts per minute)"""
+    """Change user password"""
     try:
         # Get the user
         user = db.query(User).filter(User.id == password_request.userId).first()
@@ -2193,39 +2299,6 @@ async def change_password(
             status_code=500,
             detail="Failed to change password. Please try again."
         )
-    
-@app.post("/api/confirm-sql")
-@limiter.limit("20/minute") 
-async def confirm_sql_action(
-    request: Request, 
-    req: ConfirmSQLRequest
-):
-    """Confirm and execute dangerous SQL (Rate limited: 20 confirmations per minute)"""
-    if not req.confirm:
-        return {
-            "type": "status",
-            "message": "SQL execution cancelled by user"
-        }
-    
-    try:
-        if not hasattr(app.state, "db_uri"):
-            raise HTTPException(status_code=400, detail="Database not connected")
-
-        db = db_pool_manager.get_db(app.state.db_uri)
-        result = db.run(req.sql)
-        
-        schema_cache.invalidate(app.state.db_uri)
-        query_cache.clear()
-        
-        return {
-            "type": "status",
-            "message": f"SQL executed successfully. Result: {result}"
-        }
-    except Exception as e:
-        return {
-            "type": "error",
-            "message": str(e)
-        }
 
 @app.get("/api/cache-stats")
 async def get_cache_stats():

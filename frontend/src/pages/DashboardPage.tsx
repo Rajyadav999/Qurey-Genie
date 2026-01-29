@@ -165,42 +165,77 @@ const DashboardPage = () => {
     }
   };
 
-  const handleConnect = async (data: any) => {
-    try {
-      const response = await fetch(`${API_BASE}/api/connect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          host: data.host,
-          port: parseInt(data.port),
-          user: data.user,
-          password: data.password,
-          database: data.database
-        })
-      });
+ const handleConnect = async (data: any) => {
+  // ✅ Validate that we have all required fields
+  console.log('[DASHBOARD] handleConnect called with data:', data);
+  
+  if (!data.db_type) {
+    console.error('[DASHBOARD] Missing db_type in connection data:', data);
+    toast({
+      variant: "destructive",
+      title: "Connection Error",
+      description: "Database type is missing. Please try reconnecting.",
+    });
+    return;
+  }
 
-      const result = await response.json();
+  if (!data.database) {
+    console.error('[DASHBOARD] Missing database in connection data:', data);
+    toast({
+      variant: "destructive",
+      title: "Connection Error",
+      description: "Database name is missing. Please try reconnecting.",
+    });
+    return;
+  }
 
-      if (response.ok && result.success) {
-        setConnectionData(data);
-        setIsConnected(true);
-        setIsModalOpen(false);
-        toast({
-          title: "✅ Connected Successfully",
-          description: `Connected to ${data.database} database`,
-        });
-      } else {
-        throw new Error(result.detail?.message || 'Connection failed');
-      }
-    } catch (error: any) {
-      console.error('[DASHBOARD] Connection error:', error);
+  // ✅ Prevent duplicate connections if already connecting
+  if (isConnected && connectionData?.database === data.database && connectionData?.host === data.host) {
+    console.log('[DASHBOARD] Already connected to this database, skipping duplicate connection');
+    return;
+  }
+
+  try {
+    console.log('[DASHBOARD] Sending connection request to backend...');
+    
+    const response = await fetch(`${API_BASE}/api/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: data.host,
+        port: parseInt(data.port),
+        user: data.user,
+        password: data.password,
+        database: data.database,
+        db_type: data.db_type
+      })
+    });
+
+    const result = await response.json();
+
+    if (response.ok && result.success) {
+      setConnectionData(data);
+      setIsConnected(true);
+      setIsModalOpen(false);
+      
+      console.log('[DASHBOARD] Connection successful!');
+      
       toast({
-        variant: "destructive",
-        title: "Connection Failed",
-        description: error.message || 'Failed to connect to database',
+        title: "✅ Connected Successfully",
+        description: `Connected to ${data.database} database (${data.db_type?.toUpperCase()})`,
       });
+    } else {
+      throw new Error(result.detail?.message || 'Connection failed');
     }
-  };
+  } catch (error: any) {
+    console.error('[DASHBOARD] Connection error:', error);
+    toast({
+      variant: "destructive",
+      title: "Connection Failed",
+      description: error.message || 'Failed to connect to database',
+    });
+  }
+};
 
   const handleOpenModal = () => {
     setIsModalOpen(true);
