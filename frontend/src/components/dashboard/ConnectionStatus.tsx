@@ -16,6 +16,7 @@ interface TableSchema {
 interface ConnectionStatusProps {
   isConnected: boolean;
   databaseName?: string;
+  dbType?: string;
   onSwitchDatabase?: () => void;
   onDisconnect?: () => void;
 }
@@ -23,6 +24,7 @@ interface ConnectionStatusProps {
 const ConnectionStatus: React.FC<ConnectionStatusProps> = ({ 
   isConnected, 
   databaseName = "database",
+  dbType,
   onSwitchDatabase,
   onDisconnect
 }) => {
@@ -59,21 +61,21 @@ const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
       setLoadingSchemas(new Set());
     }
   }, [isConnected, databaseName]);
-// Event-based refresh - only refresh when explicitly triggered
-useEffect(() => {
-  if (!isConnected) return;
-  
-  const handleRefresh = () => {
-    fetchTables();
-  };
-  
-  // Listen for custom refresh event
-  window.addEventListener('refreshDatabaseSchema', handleRefresh);
-  
-  return () => {
-    window.removeEventListener('refreshDatabaseSchema', handleRefresh);
-  };
-}, [isConnected]);
+
+  useEffect(() => {
+    if (!isConnected) return;
+    
+    const handleRefresh = () => {
+      fetchTables();
+    };
+    
+    window.addEventListener('refreshDatabaseSchema', handleRefresh);
+    
+    return () => {
+      window.removeEventListener('refreshDatabaseSchema', handleRefresh);
+    };
+  }, [isConnected]);
+
   const fetchTables = async () => {
     setIsLoadingTables(true);
     setError(null);
@@ -240,79 +242,141 @@ useEffect(() => {
     return `${days}d ago`;
   };
 
-  
+  const getDbTypeStyle = (type?: string) => {
+    if (!type) return null;
+    
+    const lowerType = type.toLowerCase();
+    
+    if (lowerType === 'mysql') {
+      return {
+        label: 'MySQL',
+        emoji: '🐬',
+        gradient: 'from-amber-500/20 via-orange-500/20 to-rose-500/20',
+        border: 'border-amber-400/30 dark:border-amber-600/20',
+        text: 'text-amber-200 dark:text-amber-300',
+        shadow: 'shadow-[inset_0_1px_0_0_rgba(251,191,36,0.1)]'
+      };
+    }
+    
+    if (lowerType === 'postgresql') {
+      return {
+        label: 'PostgreSQL',
+        emoji: '🐘',
+        gradient: 'from-sky-500/20 via-blue-500/20 to-indigo-500/20',
+        border: 'border-sky-400/30 dark:border-sky-600/20',
+        text: 'text-sky-200 dark:text-sky-300',
+        shadow: 'shadow-[inset_0_1px_0_0_rgba(56,189,248,0.1)]'
+      };
+    }
+    
+    return null;
+  };
+
   const getTypeIcon = (type: string) => {
     const lowerType = type.toLowerCase();
     
     if (lowerType.includes('int') || lowerType.includes('decimal') || lowerType.includes('float') || lowerType.includes('double')) {
-      return { icon: Hash, color: 'text-blue-600 dark:text-blue-400', bg: 'bg-blue-100 dark:bg-blue-900/30' };
+      return { 
+        icon: Hash, 
+        gradient: 'from-blue-500/10 to-indigo-500/10',
+        border: 'border-blue-400/20',
+        text: 'text-blue-400 dark:text-blue-300',
+        shadow: 'shadow-[inset_0_1px_0_0_rgba(59,130,246,0.1)]'
+      };
     }
     if (lowerType.includes('char') || lowerType.includes('text') || lowerType.includes('varchar')) {
-      return { icon: Type, color: 'text-purple-600 dark:text-purple-400', bg: 'bg-purple-100 dark:bg-purple-900/30' };
+      return { 
+        icon: Type, 
+        gradient: 'from-violet-500/10 to-purple-500/10',
+        border: 'border-violet-400/20',
+        text: 'text-violet-400 dark:text-violet-300',
+        shadow: 'shadow-[inset_0_1px_0_0_rgba(139,92,246,0.1)]'
+      };
     }
     if (lowerType.includes('date') || lowerType.includes('time')) {
-      return { icon: Calendar, color: 'text-orange-600 dark:text-orange-400', bg: 'bg-orange-100 dark:bg-orange-900/30' };
+      return { 
+        icon: Calendar, 
+        gradient: 'from-amber-500/10 to-orange-500/10',
+        border: 'border-amber-400/20',
+        text: 'text-amber-400 dark:text-amber-300',
+        shadow: 'shadow-[inset_0_1px_0_0_rgba(245,158,11,0.1)]'
+      };
     }
     if (lowerType.includes('bool') || lowerType.includes('bit')) {
-      return { icon: ToggleLeft, color: 'text-green-600 dark:text-green-400', bg: 'bg-green-100 dark:bg-green-900/30' };
+      return { 
+        icon: ToggleLeft, 
+        gradient: 'from-emerald-500/10 to-teal-500/10',
+        border: 'border-emerald-400/20',
+        text: 'text-emerald-400 dark:text-emerald-300',
+        shadow: 'shadow-[inset_0_1px_0_0_rgba(16,185,129,0.1)]'
+      };
     }
-    return { icon: Database, color: 'text-gray-600 dark:text-gray-400', bg: 'bg-gray-100 dark:bg-gray-900/30' };
+    return { 
+      icon: Database, 
+      gradient: 'from-slate-500/10 to-slate-600/10',
+      border: 'border-slate-400/20',
+      text: 'text-slate-400 dark:text-slate-300',
+      shadow: 'shadow-[inset_0_1px_0_0_rgba(100,116,139,0.1)]'
+    };
   };
 
   if (!isConnected) return null;
 
   const tableCount = tables.length;
+  const dbTypeStyle = getDbTypeStyle(dbType);
 
   return (
     <>
-      
+      {/* ===== MAIN CONNECTION STATUS BUTTON ===== */}
       <div className="w-full group/status">
         <button
           onClick={handleOpenModal}
           className="
             w-full relative overflow-hidden
-            flex items-center gap-3.5 px-5 py-3.5
-            bg-white dark:bg-gray-900
+            flex items-center gap-3.5 px-6 py-4
+            bg-white dark:bg-slate-900
             rounded-2xl
-            border-2 border-emerald-200/60 dark:border-emerald-800/40
-            shadow-lg shadow-emerald-500/10 dark:shadow-emerald-500/5
-            hover:shadow-xl hover:shadow-emerald-500/20 dark:hover:shadow-emerald-500/10
-            hover:border-emerald-300 dark:hover:border-emerald-700
+            border-2 border-indigo-200/30 dark:border-indigo-800/30
+            shadow-[0_8px_32px_rgba(79,70,229,0.12)]
+            hover:shadow-[0_12px_48px_rgba(79,70,229,0.20)]
+            hover:border-indigo-300/50 dark:hover:border-indigo-700/50
             transition-all duration-500 ease-out
-            hover:-translate-y-0.5
-            focus:outline-none focus:ring-4 focus:ring-emerald-500/20
+            hover:-translate-y-1
+            focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cyan-400/40 focus-visible:ring-offset-2
+            active:scale-[0.99]
           "
           aria-label="View database connection details"
         >
-          <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/5 via-teal-500/5 to-cyan-500/5 opacity-0 group-hover/status:opacity-100 transition-opacity duration-500"></div>
+          {/* Gradient overlay */}
+          <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/[0.02] via-violet-500/[0.04] to-indigo-500/[0.02] opacity-0 group-hover/status:opacity-100 transition-opacity duration-500"></div>
 
-          <div className="absolute inset-0 -translate-x-full group-hover/status:translate-x-full transition-transform duration-1000 bg-gradient-to-r from-transparent via-white/10 to-transparent"></div>
+          {/* Sweep animation */}
+          <div className="absolute inset-0 -translate-x-full group-hover/status:translate-x-full transition-transform duration-1000 bg-gradient-to-r from-transparent via-indigo-400/10 to-transparent"></div>
           
           <div className="relative flex items-center gap-3.5 flex-1 min-w-0 z-10">
+            {/* Active pulse indicator */}
             <div className="relative flex-shrink-0">
-              <div className="w-3 h-3 bg-emerald-500 rounded-full shadow-lg shadow-emerald-500/50"></div>
-              <div className="absolute inset-0 w-3 h-3 bg-emerald-400 rounded-full animate-ping"></div>
-              <div className="absolute inset-[-4px] w-5 h-5 bg-emerald-500/20 rounded-full animate-pulse"></div>
+              <div className="w-3 h-3 bg-cyan-400 rounded-full shadow-[0_0_20px_rgba(6,182,212,0.8)]"></div>
+              <div className="absolute inset-0 w-3 h-3 bg-cyan-400/60 rounded-full animate-ping"></div>
+              <div className="absolute inset-[-4px] w-5 h-5 bg-cyan-400/20 rounded-full animate-pulse"></div>
             </div>
             
+            {/* Connection info */}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2.5 mb-1">
-                <span className="text-sm font-bold text-gray-900 dark:text-gray-50 truncate tracking-tight">
-                 Connected to {databaseName}
-                </span> 
-
-              {/*use this to remove check icon*/ }
-                  <ChevronDown className="
-            relative z-10 h-5 w-5 text-emerald-600 dark:text-emerald-400 flex-shrink-0
-            transform transition-all duration-300
-            group-hover/status:translate-y-1 group-hover/status:scale-110
-          " />
-
+                <span className="text-sm font-bold text-slate-900 dark:text-slate-50 truncate tracking-tight">
+                  Connected to {databaseName}
+                </span>
+                <ChevronDown className="
+                  relative z-10 h-5 w-5 text-indigo-600 dark:text-indigo-400 flex-shrink-0
+                  transform transition-all duration-300
+                  group-hover/status:translate-y-1 group-hover/status:scale-110
+                " />
               </div>
-              <div className="flex items-center gap-2.5 text-xs text-gray-600 dark:text-gray-400">
+              <div className="flex items-center gap-2.5 text-xs text-slate-600 dark:text-slate-400">
                 {isLoadingTables ? (
                   <span className="flex items-center gap-1.5">
-                    <div className="w-3 h-3 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                    <div className="w-3 h-3 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
                     <span className="font-medium">Loading tables...</span>
                   </span>
                 ) : error ? (
@@ -322,10 +386,9 @@ useEffect(() => {
                   </span>
                 ) : (
                   <>
-                    <span className="flex items-center gap-1.5 font-semibold text-gray-900 dark:text-gray-100">  
-                      {tableCount} tables available 
+                    <span className="flex items-center gap-1.5 font-semibold text-slate-900 dark:text-slate-100">
+                      {tableCount} tables available
                     </span>
-                   
                     <span className="flex items-center gap-1.5">
                       <Clock className="w-3.5 h-3.5" />
                       {getTimeAgo(connectionTime)}
@@ -335,14 +398,13 @@ useEffect(() => {
               </div>
             </div>
           </div>
-        
         </button>
       </div>
 
-    
+      {/* ===== MODAL ===== */}
       {showModal && (
         <div 
-          className="fixed inset-0 bg-gradient-to-br from-black/70 via-black/60 to-black/70 backdrop-blur-xl flex items-center justify-center z-50 p-4 animate-fadeIn"
+          className="fixed inset-0 bg-slate-950/80 backdrop-blur-xl flex items-center justify-center z-50 p-4 animate-fadeIn"
           onClick={handleCloseModal}
           role="dialog"
           aria-modal="true"
@@ -350,40 +412,50 @@ useEffect(() => {
         >
           <div 
             className="
-              bg-white dark:bg-gray-900
+              bg-white dark:bg-slate-900
               rounded-3xl shadow-2xl
               max-w-4xl w-full max-h-[92vh]
               overflow-hidden
-              border border-gray-200/50 dark:border-gray-700/50
+              border border-slate-200/50 dark:border-slate-700/50
               animate-scaleIn
             "
             onClick={(e) => e.stopPropagation()}
           >
             {/* ===== PREMIUM HEADER ===== */}
-            <div className="relative bg-gradient-to-br from-emerald-500 via-teal-500 to-cyan-600 p-8 overflow-hidden">
-              {/* Animated mesh gradient background */}
-              <div className="absolute inset-0 opacity-30">
-                <div className="absolute top-0 left-0 w-72 h-72 bg-emerald-400 rounded-full mix-blend-multiply filter blur-3xl animate-blob"></div>
-                <div className="absolute top-0 right-0 w-72 h-72 bg-teal-400 rounded-full mix-blend-multiply filter blur-3xl animate-blob animation-delay-2000"></div>
-                <div className="absolute bottom-0 left-1/2 w-72 h-72 bg-cyan-400 rounded-full mix-blend-multiply filter blur-3xl animate-blob animation-delay-4000"></div>
+            <div className="relative bg-gradient-to-br from-slate-900 via-indigo-900 to-violet-900 dark:from-slate-950 dark:via-indigo-950 dark:to-violet-950 p-8 overflow-hidden">
+              {/* Neural network pattern */}
+              <div className="absolute inset-0 opacity-[0.15]">
+                <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
+                  <defs>
+                    <pattern id="neural-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                      <circle cx="20" cy="20" r="1.5" fill="#6366F1" opacity="0.5"/>
+                      <line x1="20" y1="20" x2="60" y2="20" stroke="#8B5CF6" strokeWidth="0.5" opacity="0.3"/>
+                      <line x1="20" y1="20" x2="20" y2="60" stroke="#8B5CF6" strokeWidth="0.5" opacity="0.3"/>
+                    </pattern>
+                  </defs>
+                  <rect width="100%" height="100%" fill="url(#neural-grid)"/>
+                </svg>
               </div>
-              
-              {/* Dot pattern overlay */}
-              <div className="absolute inset-0 opacity-10" style={{
-                backgroundImage: `radial-gradient(circle, white 1px, transparent 1px)`,
-                backgroundSize: '24px 24px'
-              }}></div>
+
+              {/* Film grain texture */}
+              <div className="absolute inset-0 opacity-[0.03] mix-blend-overlay pointer-events-none" 
+                style={{
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")`,
+                  backgroundRepeat: 'repeat',
+                  backgroundSize: '128px'
+                }}>
+              </div>
 
               <div className="relative flex items-start gap-5">
                 {/* Database icon with glassmorphism */}
                 <div className="
-                  relative bg-white/20 dark:bg-white/10 p-4 rounded-2xl
+                  relative bg-white/10 dark:bg-white/5 p-4 rounded-2xl
                   backdrop-blur-xl shadow-2xl
-                  border border-white/30
+                  border border-white/20
                   group/icon hover:scale-110 transition-transform duration-300
                 ">
                   <Database className="h-8 w-8 text-white" strokeWidth={2.5} />
-                  <div className="absolute inset-0 bg-white/20 rounded-2xl opacity-0 group-hover/icon:opacity-100 transition-opacity duration-300"></div>
+                  <div className="absolute inset-0 bg-white/10 rounded-2xl opacity-0 group-hover/icon:opacity-100 transition-opacity duration-300"></div>
                 </div>
                 
                 {/* Title and stats */}
@@ -395,7 +467,7 @@ useEffect(() => {
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="
                       flex items-center gap-2 
-                      bg-white/20 dark:bg-white/10 
+                      bg-white/10 dark:bg-white/5
                       backdrop-blur-md px-3 py-1.5 rounded-xl
                       border border-white/20
                       shadow-lg
@@ -404,9 +476,23 @@ useEffect(() => {
                       <span className="text-sm font-bold text-white">Active Connection</span>
                     </div>
 
-                     <div className="
+                    {/* Database Type Badge */}
+                    {dbTypeStyle && (
+                      <div className={`
+                        flex items-center gap-2 
+                        bg-gradient-to-br ${dbTypeStyle.gradient}
+                        backdrop-blur-md px-3 py-1.5 rounded-xl
+                        border ${dbTypeStyle.border}
+                        ${dbTypeStyle.shadow}
+                      `}>
+                        <span className="text-base">{dbTypeStyle.emoji}</span>
+                        <span className={`text-sm font-bold ${dbTypeStyle.text}`}>{dbTypeStyle.label}</span>
+                      </div>
+                    )}
+
+                    <div className="
                       flex items-center gap-2 
-                      bg-white/20 dark:bg-white/10 
+                      bg-white/10 dark:bg-white/5
                       backdrop-blur-md px-3 py-1.5 rounded-xl
                       border border-white/20
                       shadow-lg
@@ -417,12 +503,12 @@ useEffect(() => {
 
                     <div className="
                       flex items-center gap-2 
-                      bg-white/20 dark:bg-white/10 
+                      bg-white/10 dark:bg-white/5
                       backdrop-blur-md px-3 py-1.5 rounded-xl
                       border border-white/20
                       shadow-lg
                     ">
-                      <Clock className="w-3.5 h-3.5 text-white"  strokeWidth={2.5} />
+                      <Clock className="w-3.5 h-3.5 text-white" strokeWidth={2.5} />
                       <span className="text-sm font-bold text-white">{getTimeAgo(connectionTime)}</span>
                     </div>
                   </div>
@@ -432,31 +518,32 @@ useEffect(() => {
                 <button
                   onClick={handleCloseModal}
                   className="
-                    relative bg-white/20 hover:bg-white/30 backdrop-blur-md
+                    relative bg-white/10 hover:bg-white/20 backdrop-blur-md
                     p-3 rounded-xl transition-all duration-300
                     hover:rotate-90 hover:scale-110
                     border border-white/20
                     shadow-lg
                     group/close
+                    focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cyan-400/40
                   "
                   aria-label="Close modal"
                 >
                   <X className="h-5 w-5 text-white" strokeWidth={3} />
-                  <div className="absolute inset-0 bg-white/20 rounded-xl opacity-0 group-hover/close:opacity-100 transition-opacity duration-300"></div>
+                  <div className="absolute inset-0 bg-white/10 rounded-xl opacity-0 group-hover/close:opacity-100 transition-opacity duration-300"></div>
                 </button>
               </div>
             </div>
 
             {/* ===== MODAL CONTENT ===== */}
-            <div className="p-8 bg-gradient-to-br from-gray-50 to-gray-100/50 dark:from-gray-800/50 dark:to-gray-900/50">
-              {/* Section Header with Stats Grid */}
+            <div className="p-8 bg-gradient-to-br from-slate-50 to-slate-100/50 dark:from-slate-800/50 dark:to-slate-900/50">
+              {/* Section Header */}
               <div className="mb-6">
                 <div className="flex items-center justify-between mb-4">
                   <div>
-                    <h3 className="text-2xl font-bold text-gray-900 dark:text-gray-50 mb-1 tracking-tight">
+                    <h3 className="text-2xl font-bold bg-gradient-to-br from-slate-900 via-indigo-900 to-slate-900 dark:from-slate-50 dark:via-indigo-100 dark:to-slate-50 bg-clip-text text-transparent mb-1 tracking-tight">
                       Database Schema
                     </h3>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                    <p className="text-sm text-slate-600 dark:text-slate-400 font-medium">
                       Explore {tableCount} {tableCount === 1 ? 'table' : 'tables'} and their structure
                     </p>
                   </div>
@@ -467,11 +554,11 @@ useEffect(() => {
               {isLoadingTables ? (
                 <div className="flex flex-col items-center justify-center py-20">
                   <div className="relative w-16 h-16 mb-4">
-                    <div className="absolute inset-0 border-4 border-gray-200 dark:border-gray-700 rounded-full"></div>
-                    <div className="absolute inset-0 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                    <div className="absolute inset-0 border-4 border-indigo-200/20 rounded-full"></div>
+                    <div className="absolute inset-0 border-4 border-transparent border-t-indigo-500 border-r-violet-500 rounded-full animate-spin"></div>
                   </div>
-                  <p className="text-sm font-semibold text-gray-600 dark:text-gray-400">Loading tables...</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">Please wait</p>
+                  <p className="text-sm font-semibold text-slate-600 dark:text-slate-400">Loading tables...</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-500 mt-1">Please wait</p>
                 </div>
               ) : error ? (
                 <div className="
@@ -488,11 +575,11 @@ useEffect(() => {
                 </div>
               ) : tableCount === 0 ? (
                 <div className="text-center py-20 px-6">
-                  <div className="w-20 h-20 bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-700 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-xl">
-                    <Database className="w-10 h-10 text-gray-400 dark:text-gray-500" strokeWidth={2} />
+                  <div className="w-20 h-20 bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-800 dark:to-slate-700 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-xl">
+                    <Database className="w-10 h-10 text-slate-400 dark:text-slate-500" strokeWidth={2} />
                   </div>
-                  <h4 className="text-xl font-bold text-gray-900 dark:text-gray-50 mb-2">No Tables Found</h4>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">This database is empty. Create your first table to get started.</p>
+                  <h4 className="text-xl font-bold text-slate-900 dark:text-slate-50 mb-2">No Tables Found</h4>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">This database is empty. Create your first table to get started.</p>
                 </div>
               ) : (
                 <div className="space-y-3 max-h-[52vh] overflow-y-auto pr-3 custom-scrollbar">
@@ -506,13 +593,13 @@ useEffect(() => {
                         key={table}
                         className="
                           group/table 
-                          bg-white dark:bg-gray-800/50 
+                          bg-white dark:bg-slate-800/50 
                           rounded-2xl 
-                          border-2 border-gray-200/60 dark:border-gray-700/50
+                          border-2 border-slate-200/60 dark:border-slate-700/50
                           overflow-hidden 
-                          hover:border-emerald-300 dark:hover:border-emerald-700
-                          hover:shadow-2xl hover:shadow-emerald-500/10
-                          transition-all duration-300
+                          hover:border-indigo-300/50 dark:hover:border-indigo-700/40
+                          hover:shadow-[0_8px_32px_rgba(79,70,229,0.15)]
+                          transition-all duration-500
                           animate-slideInStagger
                         "
                         style={{ animationDelay: `${index * 30}ms` }}
@@ -521,34 +608,39 @@ useEffect(() => {
                         <button
                           onClick={() => handleTableClick(table)}
                           className="
-                            w-full flex items-center gap-4 px-5 py-4
-                            hover:bg-gradient-to-r hover:from-emerald-50/50 hover:to-teal-50/50
-                            dark:hover:from-emerald-950/20 dark:hover:to-teal-950/20
-                            transition-all duration-300
-                            focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-inset
+                            w-full flex items-center gap-4 px-6 py-4
+                            hover:bg-gradient-to-r 
+                            hover:from-indigo-500/[0.03] hover:via-violet-500/[0.05] hover:to-indigo-500/[0.03]
+                            dark:hover:from-indigo-400/[0.02] dark:hover:via-violet-400/[0.04] dark:hover:to-indigo-400/[0.02]
+                            transition-all duration-500
+                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-inset
+                            relative overflow-hidden
                           "
                           aria-expanded={isExpanded}
                         >
+                          {/* Sweep animation */}
+                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-indigo-400/5 to-transparent translate-x-[-100%] group-hover/table:translate-x-[100%] transition-transform duration-700 ease-out pointer-events-none"></div>
+
                           {/* Icon */}
                           <div className="
                             relative w-12 h-12 
-                            bg-gradient-to-br from-emerald-500 to-teal-500 
+                            bg-gradient-to-br from-indigo-500 to-violet-500 
                             rounded-xl flex items-center justify-center flex-shrink-0
-                            shadow-lg shadow-emerald-500/30
+                            shadow-lg shadow-indigo-500/30
                             group-hover/table:scale-110 group-hover/table:rotate-3
                             transition-all duration-300
                           ">
                             <Table className="h-6 w-6 text-white" strokeWidth={2.5} />
-                            <div className="absolute inset-0 bg-white/20 rounded-xl opacity-0 group-hover/table:opacity-100 transition-opacity duration-300"></div>
+                            <div className="absolute inset-0 bg-white/10 rounded-xl opacity-0 group-hover/table:opacity-100 transition-opacity duration-300"></div>
                           </div>
                           
                           {/* Table Info */}
                           <div className="flex-1 min-w-0 text-left">
-                            <h4 className="font-mono text-base font-bold text-gray-900 dark:text-gray-50 truncate mb-0.5">
+                            <h4 className="font-mono text-base font-bold text-indigo-700 dark:text-indigo-300 truncate mb-0.5 tracking-tight">
                               {table}
                             </h4>
                             {schema && (
-                              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+                              <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
                                 {schema.columns.length} columns • {schema.columns.filter(c => c.key === 'PRI').length} primary keys
                               </p>
                             )}
@@ -556,13 +648,13 @@ useEffect(() => {
                           
                           {/* Status Indicator */}
                           {isLoading ? (
-                            <div className="w-6 h-6 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                            <div className="w-6 h-6 border-3 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
                           ) : (
                             <ChevronDown 
                               className={`
-                                h-6 w-6 text-gray-400 dark:text-gray-500
+                                h-6 w-6 text-slate-400 dark:text-slate-500
                                 transition-all duration-500
-                                ${isExpanded ? 'rotate-180 text-emerald-500 scale-110' : 'group-hover/table:translate-y-1'}
+                                ${isExpanded ? 'rotate-180 text-indigo-500 scale-110' : 'group-hover/table:translate-y-1'}
                               `}
                               strokeWidth={2.5}
                             />
@@ -572,27 +664,27 @@ useEffect(() => {
                         {/* Table Schema - Expanded */}
                         {isExpanded && schema && (
                           <div className="
-                            px-5 pb-5 pt-2
-                            bg-gradient-to-br from-gray-50 to-gray-100/50
-                            dark:from-gray-900/50 dark:to-gray-800/50
-                            border-t-2 border-gray-200/60 dark:border-gray-700/50
+                            px-6 pb-5 pt-2
+                            bg-gradient-to-br from-slate-50 to-slate-100/50
+                            dark:from-slate-900/50 dark:to-slate-800/50
+                            border-t-2 border-slate-200/60 dark:border-slate-700/50
                             animate-expandDown
                           ">
                             {/* Column Headers */}
                             <div className="
                               grid grid-cols-[2fr_1fr_1fr] gap-3
                               px-4 py-3 mb-2
-                              bg-white/60 dark:bg-gray-800/60
+                              bg-white/60 dark:bg-slate-800/60
                               rounded-xl
-                              border border-gray-200 dark:border-gray-700
+                              border border-slate-200 dark:border-slate-700
                             ">
-                              <span className="text-[10px] font-black uppercase tracking-widest text-gray-500 dark:text-gray-400">
+                              <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
                                 Column Name
                               </span>
-                              <span className="text-[10px] font-black uppercase tracking-widest text-gray-500 dark:text-gray-400 text-center">
-                               DataType
+                              <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400 text-center">
+                                DataType
                               </span>
-                              <span className="text-[10px] font-black uppercase tracking-widest text-gray-500 dark:text-gray-400 text-right">
+                              <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400 text-right">
                                 Constraints
                               </span>
                             </div>
@@ -610,10 +702,10 @@ useEffect(() => {
                                       group/column
                                       grid grid-cols-[2fr_1fr_1fr] gap-3 items-center
                                       px-4 py-3 rounded-xl
-                                      bg-white dark:bg-gray-800/50
-                                      border-2 border-gray-200/60 dark:border-gray-700/50
-                                      hover:border-emerald-300 dark:hover:border-emerald-700
-                                      hover:shadow-lg hover:shadow-emerald-500/10
+                                      bg-white dark:bg-slate-800/50
+                                      border-2 border-slate-200/60 dark:border-slate-700/50
+                                      hover:border-indigo-300/50 dark:hover:border-indigo-700/40
+                                      hover:shadow-lg hover:shadow-indigo-500/10
                                       transition-all duration-300
                                       animate-slideInStagger
                                     "
@@ -623,13 +715,15 @@ useEffect(() => {
                                     <div className="flex items-center gap-3 min-w-0">
                                       <div className={`
                                         w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0
-                                        ${typeInfo.bg}
+                                        bg-gradient-to-br ${typeInfo.gradient}
+                                        border ${typeInfo.border}
+                                        ${typeInfo.shadow}
                                         group-hover/column:scale-110 transition-transform duration-300
                                       `}>
-                                        <TypeIcon className={`w-4 h-4 ${typeInfo.color}`} strokeWidth={2.5} />
+                                        <TypeIcon className={`w-4 h-4 ${typeInfo.text}`} strokeWidth={2.5} />
                                       </div>
                                       <div className="flex-1 min-w-0">
-                                        <span className="font-mono text-sm font-bold text-gray-900 dark:text-gray-50 block truncate">
+                                        <span className="font-mono text-sm font-bold text-slate-900 dark:text-slate-50 block truncate">
                                           {column.name}
                                         </span>
                                       </div>
@@ -639,9 +733,9 @@ useEffect(() => {
                                     <div className="flex justify-center">
                                       <span className="
                                         px-3 py-1.5 rounded-lg text-xs font-mono font-bold
-                                        bg-gray-100 dark:bg-gray-900/50
-                                        text-gray-700 dark:text-gray-300
-                                        border border-gray-200 dark:border-gray-700
+                                        bg-slate-100 dark:bg-slate-900/50
+                                        text-slate-700 dark:text-slate-300
+                                        border border-slate-200 dark:border-slate-700
                                         whitespace-nowrap
                                       ">
                                         {column.type.toLowerCase()}
@@ -652,26 +746,29 @@ useEffect(() => {
                                     <div className="flex items-center gap-1.5 justify-end">
                                       {column.key === 'PRI' && (
                                         <span className="
+                                          relative overflow-hidden
                                           px-3 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-lg
-                                          bg-gradient-to-r from-amber-100 to-yellow-100
-                                          dark:from-amber-900/30 dark:to-yellow-900/30
-                                          text-amber-700 dark:text-amber-300
-                                          border-2 border-amber-200 dark:border-amber-800/50
-                                          shadow-sm shadow-amber-500/20
+                                          bg-gradient-to-br from-pink-500/20 via-rose-500/20 to-pink-600/20
+                                          text-pink-100 dark:text-pink-200
+                                          border-2 border-pink-400/40 dark:border-pink-500/30
+                                          shadow-[0_0_24px_rgba(236,72,153,0.25)]
+                                          backdrop-blur-sm
                                           flex items-center gap-1.5
                                         ">
                                           <Key className="w-3 h-3" strokeWidth={3} />
                                           PK
+                                          {/* Shimmer effect */}
+                                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full animate-shimmer"></div>
                                         </span>
                                       )}
                                       {column.key === 'MUL' && (
                                         <span className="
                                           px-3 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-lg
-                                          bg-gradient-to-r from-blue-100 to-indigo-100
-                                          dark:from-blue-900/30 dark:to-indigo-900/30
-                                          text-blue-700 dark:text-blue-300
-                                          border-2 border-blue-200 dark:border-blue-800/50
-                                          shadow-sm shadow-blue-500/20
+                                          bg-gradient-to-br from-blue-500/20 via-indigo-500/20 to-blue-600/20
+                                          text-blue-100 dark:text-blue-200
+                                          border-2 border-blue-400/40 dark:border-blue-500/30
+                                          shadow-[0_0_16px_rgba(59,130,246,0.2)]
+                                          backdrop-blur-sm
                                         ">
                                           FK
                                         </span>
@@ -679,11 +776,11 @@ useEffect(() => {
                                       {column.key === 'UNI' && (
                                         <span className="
                                           px-3 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-lg
-                                          bg-gradient-to-r from-purple-100 to-pink-100
-                                          dark:from-purple-900/30 dark:to-pink-900/30
-                                          text-purple-700 dark:text-purple-300
-                                          border-2 border-purple-200 dark:border-purple-800/50
-                                          shadow-sm shadow-purple-500/20
+                                          bg-gradient-to-br from-violet-500/20 via-purple-500/20 to-violet-600/20
+                                          text-violet-100 dark:text-violet-200
+                                          border-2 border-violet-400/40 dark:border-violet-500/30
+                                          shadow-[0_0_16px_rgba(139,92,246,0.2)]
+                                          backdrop-blur-sm
                                         ">
                                           UNQ
                                         </span>
@@ -691,9 +788,9 @@ useEffect(() => {
                                       {!column.nullable && !column.key && (
                                         <span className="
                                           px-3 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-lg
-                                          bg-gray-100 dark:bg-gray-800
-                                          text-gray-600 dark:text-gray-400
-                                          border-2 border-gray-200 dark:border-gray-700
+                                          bg-slate-100 dark:bg-slate-800
+                                          text-slate-600 dark:text-slate-400
+                                          border-2 border-slate-200 dark:border-slate-700
                                         ">
                                           NOT NULL
                                         </span>
@@ -712,7 +809,7 @@ useEffect(() => {
               )}
 
               {/* ===== PREMIUM ACTION BUTTONS ===== */}
-              <div className="mt-8 pt-6 border-t-2 border-gray-200 dark:border-gray-700 flex gap-3">
+              <div className="mt-8 pt-6 border-t-2 border-slate-200 dark:border-slate-700 flex gap-3">
                 {onSwitchDatabase && (
                   <button 
                     onClick={() => {
@@ -724,14 +821,15 @@ useEffect(() => {
                       flex items-center justify-center gap-3
                       px-6 py-4 rounded-xl
                       text-sm font-bold
-                      bg-gradient-to-r from-emerald-600 to-teal-600
-                      hover:from-emerald-500 hover:to-teal-500
+                      bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-700
+                      hover:from-indigo-500 hover:via-violet-500 hover:to-indigo-600
                       text-white
-                      shadow-xl shadow-emerald-500/30
-                      hover:shadow-2xl hover:shadow-emerald-500/40
+                      shadow-[0_8px_32px_rgba(79,70,229,0.35)]
+                      hover:shadow-[0_12px_48px_rgba(79,70,229,0.45)]
                       hover:scale-105
+                      active:scale-[0.97]
                       transition-all duration-300
-                      focus:outline-none focus:ring-4 focus:ring-emerald-500/40
+                      focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cyan-400/40
                     "
                   >
                     <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 -translate-x-full group-hover/btn:translate-x-full transition-transform duration-700"></div>
@@ -751,14 +849,15 @@ useEffect(() => {
                       flex items-center justify-center gap-3
                       px-6 py-4 rounded-xl
                       text-sm font-bold
-                      bg-gradient-to-r from-red-600 to-rose-600
-                      hover:from-red-500 hover:to-rose-500
+                      bg-gradient-to-r from-red-600 via-rose-600 to-red-700
+                      hover:from-red-500 hover:via-rose-500 hover:to-red-600
                       text-white
-                      shadow-xl shadow-red-500/30
-                      hover:shadow-2xl hover:shadow-red-500/40
+                      shadow-[0_8px_32px_rgba(239,68,68,0.35)]
+                      hover:shadow-[0_12px_48px_rgba(239,68,68,0.45)]
                       hover:scale-105
+                      active:scale-[0.97]
                       transition-all duration-300
-                      focus:outline-none focus:ring-4 focus:ring-red-500/40
+                      focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-red-400/40
                     "
                   >
                     <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 -translate-x-full group-hover/btn:translate-x-full transition-transform duration-700"></div>
@@ -774,7 +873,7 @@ useEffect(() => {
 
       <style>{`
         /* ============================================
-           ADVANCED ANIMATIONS
+           WORLD-CLASS ANIMATIONS
            ============================================ */
         
         @keyframes fadeIn {
@@ -821,18 +920,12 @@ useEffect(() => {
           }
         }
 
-        @keyframes blob {
+        @keyframes shimmer {
           0% {
-            transform: translate(0px, 0px) scale(1);
-          }
-          33% {
-            transform: translate(30px, -50px) scale(1.1);
-          }
-          66% {
-            transform: translate(-20px, 20px) scale(0.9);
+            transform: translateX(-100%);
           }
           100% {
-            transform: translate(0px, 0px) scale(1);
+            transform: translateX(100%);
           }
         }
 
@@ -852,20 +945,12 @@ useEffect(() => {
           animation: slideInStagger 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
         }
 
-        .animate-blob {
-          animation: blob 7s infinite;
-        }
-
-        .animation-delay-2000 {
-          animation-delay: 2s;
-        }
-
-        .animation-delay-4000 {
-          animation-delay: 4s;
+        .animate-shimmer {
+          animation: shimmer 2s infinite;
         }
 
         /* ============================================
-           PREMIUM SCROLLBAR
+           PREMIUM INDIGO SCROLLBAR
            ============================================ */
         .custom-scrollbar::-webkit-scrollbar {
           width: 10px;
@@ -878,26 +963,26 @@ useEffect(() => {
         }
         
         .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: linear-gradient(to bottom, rgb(16 185 129), rgb(20 184 166));
+          background: linear-gradient(to bottom, rgb(79 70 229), rgb(139 92 246));
           border-radius: 100px;
           border: 2px solid transparent;
           background-clip: padding-box;
-          box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+          box-shadow: 0 0 8px rgba(79, 70, 229, 0.5);
         }
         
         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: linear-gradient(to bottom, rgb(5 150 105), rgb(13 148 136));
+          background: linear-gradient(to bottom, rgb(99 102 241), rgb(167 139 250));
           background-clip: padding-box;
-          box-shadow: 0 0 12px rgba(16, 185, 129, 0.7);
+          box-shadow: 0 0 12px rgba(79, 70, 229, 0.7);
         }
 
         /* Dark mode scrollbar */
         .dark .custom-scrollbar::-webkit-scrollbar-thumb {
-          box-shadow: 0 0 6px rgba(16, 185, 129, 0.3);
+          box-shadow: 0 0 8px rgba(79, 70, 229, 0.3);
         }
 
         .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          box-shadow: 0 0 12px rgba(16, 185, 129, 0.5);
+          box-shadow: 0 0 12px rgba(79, 70, 229, 0.5);
         }
 
         /* ============================================
@@ -906,7 +991,7 @@ useEffect(() => {
         
         /* Focus visible for keyboard navigation */
         *:focus-visible {
-          outline: 3px solid rgb(16 185 129);
+          outline: 3px solid rgb(6 182 212);
           outline-offset: 3px;
         }
 
@@ -923,13 +1008,17 @@ useEffect(() => {
 
         /* High contrast mode support */
         @media (prefers-contrast: high) {
-          .border-emerald-200 {
-            border-color: rgb(205, 117, 222);
+          .border-indigo-200 {
+            border-color: rgb(79 70 229);
             border-width: 3px;
           }
           
-          .text-gray-600 {
+          .text-slate-600 {
             color: rgb(0 0 0);
+          }
+          
+          .dark .text-slate-400 {
+            color: rgb(255 255 255);
           }
         }
       `}</style>

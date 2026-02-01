@@ -28,6 +28,7 @@ interface ChatSession {
   title: string;
   timestamp: string | number | Date;
   messages: Message[];
+  isStarred?: boolean;  // 🔥 ADDED
 }
 
 interface PendingSQL {
@@ -121,6 +122,7 @@ const DashboardPage = () => {
               user_id: session.user_id,
               title: session.title || 'Untitled Chat',
               timestamp: session.timestamp || new Date().toISOString(),
+              isStarred: session.isStarred || false,  // 🔥 ADDED
               messages: Array.isArray(session.messages) 
                 ? session.messages.map((msg: any) => ({
                     id: msg.id || `msg-${Date.now()}`,
@@ -165,77 +167,78 @@ const DashboardPage = () => {
     }
   };
 
- const handleConnect = async (data: any) => {
-  // ✅ Validate that we have all required fields
-  console.log('[DASHBOARD] handleConnect called with data:', data);
-  
-  if (!data.db_type) {
-    console.error('[DASHBOARD] Missing db_type in connection data:', data);
-    toast({
-      variant: "destructive",
-      title: "Connection Error",
-      description: "Database type is missing. Please try reconnecting.",
-    });
-    return;
-  }
-
-  if (!data.database) {
-    console.error('[DASHBOARD] Missing database in connection data:', data);
-    toast({
-      variant: "destructive",
-      title: "Connection Error",
-      description: "Database name is missing. Please try reconnecting.",
-    });
-    return;
-  }
-
-  // ✅ Prevent duplicate connections if already connecting
-  if (isConnected && connectionData?.database === data.database && connectionData?.host === data.host) {
-    console.log('[DASHBOARD] Already connected to this database, skipping duplicate connection');
-    return;
-  }
-
-  try {
-    console.log('[DASHBOARD] Sending connection request to backend...');
+  const handleConnect = async (data: any) => {
+    console.log('[DASHBOARD] handleConnect called with data:', data);
     
-    const response = await fetch(`${API_BASE}/api/connect`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        host: data.host,
-        port: parseInt(data.port),
-        user: data.user,
-        password: data.password,
-        database: data.database,
-        db_type: data.db_type
-      })
-    });
-
-    const result = await response.json();
-
-    if (response.ok && result.success) {
-      setConnectionData(data);
-      setIsConnected(true);
-      setIsModalOpen(false);
-      
-      console.log('[DASHBOARD] Connection successful!');
-      
+    if (!data.db_type) {
+      console.error('[DASHBOARD] Missing db_type in connection data:', data);
       toast({
-        title: "✅ Connected Successfully",
-        description: `Connected to ${data.database} database (${data.db_type?.toUpperCase()})`,
+        variant: "destructive",
+        title: "Connection Error",
+        description: "Database type is missing. Please try reconnecting.",
       });
-    } else {
-      throw new Error(result.detail?.message || 'Connection failed');
+      return;
     }
-  } catch (error: any) {
-    console.error('[DASHBOARD] Connection error:', error);
-    toast({
-      variant: "destructive",
-      title: "Connection Failed",
-      description: error.message || 'Failed to connect to database',
-    });
-  }
-};
+
+    if (!data.database) {
+      console.error('[DASHBOARD] Missing database in connection data:', data);
+      toast({
+        variant: "destructive",
+        title: "Connection Error",
+        description: "Database name is missing. Please try reconnecting.",
+      });
+      return;
+    }
+
+    if (isConnected && connectionData?.database === data.database && connectionData?.host === data.host) {
+      console.log('[DASHBOARD] Already connected to this database, skipping duplicate connection');
+      return;
+    }
+
+    try {
+      console.log('[DASHBOARD] Sending connection request to backend...');
+      
+      const response = await fetch(`${API_BASE}/api/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: data.host,
+          port: parseInt(data.port),
+          user: data.user,
+          password: data.password,
+          database: data.database,
+          db_type: data.db_type
+        })
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.success) {
+        setConnectionData({
+          ...data,
+          db_type: result.db_type || data.db_type
+        });
+        setIsConnected(true);
+        setIsModalOpen(false);
+        
+        console.log('[DASHBOARD] Connection successful! DB Type:', result.db_type);
+        
+        toast({
+          title: "✅ Connected Successfully",
+          description: `Connected to ${data.database} database (${data.db_type?.toUpperCase()})`,
+        });
+      } else {
+        throw new Error(result.detail?.message || 'Connection failed');
+      }
+    } catch (error: any) {
+      console.error('[DASHBOARD] Connection error:', error);
+      toast({
+        variant: "destructive",
+        title: "Connection Failed",
+        description: error.message || 'Failed to connect to database',
+      });
+    }
+  };
 
   const handleOpenModal = () => {
     setIsModalOpen(true);
@@ -283,6 +286,7 @@ const DashboardPage = () => {
 
     console.log(`[DASHBOARD] Renaming chat ${chatId} to "${newTitle}"`);
     
+    // Optimistically update UI
     setChatHistory(prev => 
       prev.map(chat => 
         chat.id === chatId 
@@ -292,8 +296,8 @@ const DashboardPage = () => {
     );
 
     try {
-      const response = await fetch(`${API_BASE}/api/chat-sessions/${chatId}`, {
-        method: 'PATCH',
+      const response = await fetch(`${API_BASE}/api/chat-sessions/${chatId}/rename`, {
+        method: 'PUT',
         headers: { 
           'Content-Type': 'application/json' 
         },
@@ -324,6 +328,33 @@ const DashboardPage = () => {
         description: `Chat renamed to "${newTitle}" (local only)`,
       });
     }
+  };
+
+  // 🔥 NEW FUNCTION: Handle star toggle
+  const handleStarToggle = async (chatId: string, isStarred: boolean) => {
+    if (!user?.id) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "User not authenticated",
+      });
+      return;
+    }
+
+    console.log(`[DASHBOARD] Toggling star for chat ${chatId} to ${isStarred}`);
+    
+    // ✅ Optimistically update UI immediately
+    setChatHistory(prev => 
+      prev.map(chat => 
+        chat.id === chatId 
+          ? { ...chat, isStarred } 
+          : chat
+      )
+    );
+
+    // Note: Backend call is already handled in Sidebar component
+    // We just update local state here for immediate UI feedback
+    console.log(`[DASHBOARD] Star status updated locally for chat ${chatId}`);
   };
 
   const handleConfirmSQL = async () => {
@@ -711,7 +742,8 @@ const DashboardPage = () => {
           user_id: parseInt(user.id),
           title: newSession.title,
           timestamp: newSession.timestamp,
-          messages: messages
+          messages: messages,
+          isStarred: newSession.isStarred || false  // 🔥 ADDED
         };
         
         setChatHistory(prev => [sessionToAdd, ...prev]);
@@ -830,6 +862,7 @@ const DashboardPage = () => {
           userId={user?.id ? parseInt(user.id) : null}
           isLoadingHistory={isLoadingHistory}
           onRenameChat={handleRenameChat}
+          onStarToggle={handleStarToggle}  // 🔥 ADDED
         />
 
         <div className="flex-1 flex flex-col relative">
@@ -839,6 +872,9 @@ const DashboardPage = () => {
               <ConnectionStatus 
                 isConnected={isConnected} 
                 databaseName={connectionData?.database}
+                dbType={connectionData?.db_type}
+                onDisconnect={handleDisconnect}
+                onSwitchDatabase={handleOpenModal}
               />
               <UserProfile />
             </div>

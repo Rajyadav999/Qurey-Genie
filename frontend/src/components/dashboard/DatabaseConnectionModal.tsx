@@ -35,7 +35,7 @@ interface ConnectionError {
 
 type ConnectionStep = 'credentials' | 'database-selection';
 
-// ✨ NEW: Database type configurations
+
 const DB_CONFIGS = {
   mysql: {
     name: 'MySQL',
@@ -57,13 +57,13 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
   // Step management
   const [currentStep, setCurrentStep] = useState<ConnectionStep>('credentials');
   
-  // Credentials state
+  
   const [credentials, setCredentials] = useState<DBCredentials>({
     host: '127.0.0.1',
     port: '3306',
     user: 'root',
     password: '',
-    db_type: 'mysql', // ✨ NEW: Default to MySQL
+    db_type: 'mysql', 
   });
 
   // Database selection state
@@ -683,19 +683,8 @@ export const DatabaseConnectionModal = ({ isOpen, onClose, onConnect }: Database
                   </p>
                 </div>
 
-                {/* ✨ NEW: Helpful credentials info box */}
-                <div className="rounded-lg bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 p-3">
-                  <div className="flex items-start gap-2">
-                    <Lightbulb className="h-4 w-4 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
-                    <div className="text-xs text-blue-900 dark:text-blue-100">
-                      <p className="font-semibold mb-1">💡 Default Credentials:</p>
-                      <ul className="space-y-1 text-blue-800 dark:text-blue-200">
-                        <li><strong>MySQL:</strong> User: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">root</code>, Port: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">3306</code></li>
-                        <li><strong>PostgreSQL:</strong> User: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">postgres</code>, Port: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">5432</code></li>
-                      </ul>
-                    </div>
-                  </div>
-                </div>
+              
+          
                 
                 <div className="space-y-2">
                   <Label htmlFor="password">Password</Label>

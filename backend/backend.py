@@ -24,7 +24,7 @@ import ast
 import json
 import re
 from functools import lru_cache
-from typing import Dict, Optional, Literal
+from typing import Dict, Optional, Literal, List, Any
 import hashlib
 import logging
 from urllib.parse import quote_plus 
@@ -262,6 +262,7 @@ class ChatSession(Base):
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     title = Column(String, nullable=False)
     messages = Column(Text, nullable=False)
+    is_starred = Column(Integer, default=0)
 
 class OTP(Base):
     __tablename__ = "otps"
@@ -337,7 +338,7 @@ class DBCredentials(BaseModel):
     port: int
     user: str
     password: str = ""
-    db_type: Literal["mysql", "postgresql"]  # ✨ NEW: Database type selection
+    db_type: Literal["mysql", "postgresql"]
 
 class DBSelection(BaseModel):
     """Step 2: Connect to selected database"""
@@ -346,7 +347,7 @@ class DBSelection(BaseModel):
     user: str
     password: str = ""
     database: str
-    db_type: Literal["mysql", "postgresql"]  # ✨ Database type
+    db_type: Literal["mysql", "postgresql"]
 
 class DBCreate(BaseModel):
     """Step 2.5: Create new database"""
@@ -355,7 +356,7 @@ class DBCreate(BaseModel):
     user: str
     password: str = ""
     database_name: str
-    db_type: Literal["mysql", "postgresql"]  # ✨ NEW: Database type
+    db_type: Literal["mysql", "postgresql"]
 
 class ChatRequest(BaseModel):
     question: str
@@ -575,17 +576,14 @@ def build_db_uri(config, database: str = None) -> str:
     password = quote_plus(config.password) if config.password else ""
     
     if config.db_type == DatabaseType.POSTGRESQL:
-        # PostgreSQL uses 'postgresql://' or 'postgresql+psycopg2://'
         if database:
             return f"postgresql://{config.user}:{password}@{config.host}:{config.port}/{database}"
         else:
-            # Connect to default 'postgres' database for listing
             return f"postgresql://{config.user}:{password}@{config.host}:{config.port}/postgres"
     else:  # MySQL
         if database:
             return f"mysql+mysqlconnector://{config.user}:{password}@{config.host}:{config.port}/{database}"
         else:
-            # MySQL allows connection without database
             return f"mysql+mysqlconnector://{config.user}:{password}@{config.host}:{config.port}"
 
 def get_list_databases_query(db_type: str) -> tuple[str, list]:
@@ -604,7 +602,6 @@ def get_list_databases_query(db_type: str) -> tuple[str, list]:
 def get_create_database_query(db_type: str, database_name: str) -> str:
     """Get CREATE DATABASE query based on type"""
     if db_type == DatabaseType.POSTGRESQL:
-        # PostgreSQL requires quoted identifiers
         return f'CREATE DATABASE "{database_name}"'
     else:  # MySQL
         return f"CREATE DATABASE `{database_name}`"
@@ -727,28 +724,96 @@ def extract_table_name_from_query(sql_query: str) -> str:
     except Exception as e:
         return None
 
-# ============= LANGCHAIN WITH DATABASE-AWARE PROMPTS =============
+# ============= 🔥 FIXED: PostgreSQL Result Parser =============
+def parse_postgresql_result(result_str: str) -> List[tuple]:
+    """
+    Parse PostgreSQL result strings into proper list of tuples
+    Handles formats like: [('value1',), ('value2',)] or [(1, 'text'), (2, 'text')]
+    """
+    try:
+        # Remove whitespace
+        result_str = result_str.strip()
+        
+        # Empty result
+        if not result_str or result_str == '[]':
+            return []
+        
+        # Try to parse as Python literal (safest method)
+        try:
+            parsed = ast.literal_eval(result_str)
+            if isinstance(parsed, list):
+                return parsed
+        except (ValueError, SyntaxError) as e:
+            print(f"[PARSE] ast.literal_eval failed: {e}, trying manual parsing")
+        
+        # Manual parsing for PostgreSQL tuple format
+        # Example: [('table1',), ('table2',)] or [(1, 'name'), (2, 'name')]
+        rows = []
+        
+        # Remove outer brackets
+        if result_str.startswith('[') and result_str.endswith(']'):
+            result_str = result_str[1:-1]
+        
+        # Split by ), ( pattern to separate rows
+        row_pattern = r'\([^)]*\)'
+        row_matches = re.findall(row_pattern, result_str)
+        
+        for row_match in row_matches:
+            # Remove parentheses
+            row_content = row_match.strip('()')
+            
+            # Split by comma
+            values = []
+            parts = row_content.split(',')
+            
+            for part in parts:
+                part = part.strip()
+                # Remove quotes if present
+                if (part.startswith("'") and part.endswith("'")) or \
+                   (part.startswith('"') and part.endswith('"')):
+                    part = part[1:-1]
+                
+                # Try to convert to int/float if possible
+                try:
+                    if '.' in part:
+                        values.append(float(part))
+                    else:
+                        values.append(int(part))
+                except ValueError:
+                    values.append(part)
+            
+            # Create tuple
+            if len(values) == 1:
+                rows.append((values[0],))
+            else:
+                rows.append(tuple(values))
+        
+        return rows
+    
+    except Exception as e:
+        print(f"[PARSE ERROR] Failed to parse result: {e}")
+        print(f"[PARSE ERROR] Original string: {result_str}")
+        return []
+
+# ============= 🔥 FIXED: Database-Aware SQL Prompt =============
 def get_sql_chain(cached_schema: str, db_type: str):
     """Create LangChain with database-specific prompts"""
     
     if db_type == DatabaseType.POSTGRESQL:
-        template = """You are a PostgreSQL expert. Generate ONLY valid PostgreSQL statements - no explanations, markdown, or extra text.
+        template = """You are a PostgreSQL expert. Generate ONLY the SQL query - no markdown, no explanations, no extra text.
+
+CRITICAL RULES:
+1. Return ONLY the SQL query
+2. NO ```sql blocks, NO markdown formatting
+3. NO explanations before or after
+4. Use double quotes "table_name" for identifiers
+5. End with semicolon ;
 
 QUERY PATTERNS:
-- "show tables" / "list tables" → SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname != 'pg_catalog' AND schemaname != 'information_schema';
-- "show all data" / "all records from X" → SELECT * FROM "X";
-- "count" / "how many" / "total" → SELECT COUNT(*) as count FROM "table";
-- "table count" / "number of tables" → SELECT COUNT(*) as table_count FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
-- "current database" / "database name" → SELECT current_database() as current_database;
-- "all databases" / "list databases" → SELECT datname FROM pg_database WHERE datistemplate = false;
-
-POSTGRESQL RULES:
-- Use double quotes "table_name" for identifiers, not backticks
-- Return ONLY SQL, no ```sql blocks or comments
-- Never mix COUNT(*) with non-aggregated columns without GROUP BY
-- Use LIMIT instead of LIMIT with OFFSET for pagination
-- PostgreSQL uses $1, $2 for parameters (but don't use in generated queries)
-- Use SERIAL or BIGSERIAL for auto-increment, not AUTO_INCREMENT
+- "show tables" / "list tables" → SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
+- "show all data from X" → SELECT * FROM "X";
+- "count records in X" → SELECT COUNT(*) as count FROM "X";
+- "table count" → SELECT COUNT(*) as table_count FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
 
 Schema: {schema}
 History: {chat_history}
@@ -756,23 +821,20 @@ Question: {question}
 
 SQL:"""
     else:  # MySQL
-        template = """You are a MySQL expert. Generate ONLY valid MySQL statements - no explanations, markdown, or extra text.
+        template = """You are a MySQL expert. Generate ONLY the SQL query - no markdown, no explanations, no extra text.
+
+CRITICAL RULES:
+1. Return ONLY the SQL query
+2. NO ```sql blocks, NO markdown formatting
+3. NO explanations before or after
+4. Use backticks `table_name` for identifiers
+5. End with semicolon ;
 
 QUERY PATTERNS:
 - "show tables" / "list tables" → SHOW TABLES;
-- "show all data" / "all records from X" → SELECT * FROM X;
-- "count" / "how many" / "total" → SELECT COUNT(*) as count FROM table;
-- "table count" / "number of tables" → SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = DATABASE();
-- "table names list" → SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema = DATABASE();
-- "current database" / "database name" / "which database" → SELECT DATABASE() as current_database;
-- "all databases" / "list databases" → SHOW DATABASES;
-
-MYSQL RULES:
-- Use backticks `table_name` for identifiers
-- Return ONLY SQL, no ```sql blocks or comments
-- Never mix COUNT(*) with non-aggregated columns without GROUP BY
-- Use DATABASE() for current database, SHOW DATABASES for all databases
-- Use AUTO_INCREMENT for auto-increment columns
+- "show all data from X" → SELECT * FROM X;
+- "count records in X" → SELECT COUNT(*) as count FROM X;
+- "table count" → SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = DATABASE();
 
 Schema: {schema}
 History: {chat_history}
@@ -787,12 +849,16 @@ SQL:"""
         return cached_schema
     
     return (
-        RunnablePassthrough.assign(schema=get_schema)
+        RunnablePassthrough.assign(
+            schema=get_schema,
+            db_type=lambda _: db_type.upper()
+        )
         | prompt
         | llm
         | StrOutputParser()
     )
 
+# ============= 🔥 FIXED: Response Handler with Better PostgreSQL Support =============
 def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
     """Optimized response generation with database-aware handling"""
     
@@ -819,11 +885,13 @@ def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
         sql_query = re.sub(r'\s*```$', '', sql_query)
         sql_query = sql_query.strip()
         
-        # Remove any trailing semicolons if there are multiple
+        # Remove multiple semicolons
         if sql_query.count(';') > 1:
             sql_query = sql_query.split(';')[0] + ';'
         
         sql_query = sanitize_sql_input(sql_query)
+        
+        print(f"[SQL GENERATED] {sql_query}")
         
         # Check for dangerous operations
         dangerous_ops = detect_dangerous_sql(sql_query)
@@ -839,15 +907,16 @@ def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
         
         sql_upper = sql_query.upper()
         
-        # Handle different query types
-        is_show_command = 'SHOW' in sql_upper or 'pg_catalog' in sql_query or 'pg_database' in sql_query
-        is_select = sql_upper.startswith('SELECT')
-        
         # Execute the query
         result = db.run(sql_query)
         
-        # Parse results based on query type
-        if is_show_command or is_select:
+        print(f"[RAW RESULT] Type: {type(result)}, Value: {result}")
+        
+        # 🔥 FIX: Better result parsing for PostgreSQL
+        is_select = sql_upper.startswith('SELECT') or 'SHOW' in sql_upper or 'pg_catalog' in sql_query
+        
+        if is_select:
+            # Get columns
             columns = get_columns_from_query_result(db_uri, sql_query)
             if not columns:
                 table_name = extract_table_name_from_query(sql_query)
@@ -856,6 +925,7 @@ def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
             
             clean_result = result.strip()
             
+            # Empty result
             if clean_result == '[]' or clean_result == '' or 'Empty set' in clean_result:
                 output_data = {
                     "type": "select",
@@ -863,18 +933,28 @@ def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
                     "columns": columns or [],
                     "row_count": 0
                 }
+            
+            # PostgreSQL format: [('value',)] or [(1, 'text')]
             elif clean_result.startswith('[') and clean_result.endswith(']'):
                 try:
-                    cleaned = re.sub(r"Decimal\('([^']+)'\)", r"'\1'", clean_result)
-                    try:
-                        raw_data = json.loads(cleaned.replace("'", '"').replace('None', 'null'))
-                    except:
-                        raw_data = ast.literal_eval(cleaned)
+                    # 🔥 Use improved PostgreSQL parser
+                    if db_type == DatabaseType.POSTGRESQL:
+                        raw_data = parse_postgresql_result(clean_result)
+                    else:
+                        # MySQL - use original parsing
+                        cleaned = re.sub(r"Decimal\('([^']+)'\)", r"'\1'", clean_result)
+                        try:
+                            raw_data = json.loads(cleaned.replace("'", '"').replace('None', 'null'))
+                        except:
+                            raw_data = ast.literal_eval(cleaned)
+                    
+                    print(f"[PARSED DATA] {raw_data}")
                     
                     if isinstance(raw_data, list):
                         if not raw_data:
                             data = []
                         elif isinstance(raw_data[0], (tuple, list)):
+                            # Convert tuples to lists of strings
                             data = []
                             for row in raw_data:
                                 row_data = []
@@ -891,6 +971,7 @@ def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
                         else:
                             data = [[str(item) if item is not None else ''] for item in raw_data]
                         
+                        # Auto-generate columns if missing
                         if data and not columns:
                             columns = [f'column_{i}' for i in range(len(data[0]))]
                         
@@ -900,13 +981,16 @@ def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
                             "columns": columns,
                             "row_count": len(data)
                         }
+                        
+                        print(f"[OUTPUT DATA] Rows: {len(data)}, Columns: {columns}")
                     else:
                         raise ValueError("Unexpected data format")
+                
                 except Exception as e:
-                    print(f"Error parsing result: {e}")
+                    print(f"[PARSE ERROR] {e}")
                     output_data = {
                         "type": "error",
-                        "message": f"Failed to parse: {str(e)}"
+                        "message": f"Failed to parse result: {str(e)}"
                     }
             else:
                 output_data = {
@@ -952,6 +1036,18 @@ def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
 async def startup_event():
     """Validate environment on startup"""
     validate_environment()
+    try:
+        with engine.connect() as conn:
+            # Check if column exists
+            result = conn.execute(text(
+                "SELECT name FROM pragma_table_info('chat_sessions') WHERE name='is_starred'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN is_starred INTEGER DEFAULT 0"))
+                conn.commit()
+                logger.info("✅ Added is_starred column to chat_sessions table")
+    except Exception as e:
+        logger.warning(f"⚠️ Migration check: {e}")
     
     try:
         import slowapi
@@ -1002,29 +1098,23 @@ async def list_databases(
     request: Request,
     creds: DBCredentials
 ):
-    """✨ NEW: List databases with support for both MySQL and PostgreSQL"""
+    """List databases with support for both MySQL and PostgreSQL"""
     print(f"[LIST DB] Request: host={creds.host}, port={creds.port}, user={creds.user}, type={creds.db_type}")
     
     try:
-        # Build connection URI based on database type
         db_uri = build_db_uri(creds)
         
-        # Create temporary engine
         temp_engine = create_engine(
             db_uri,
             poolclass=pool.NullPool,
             echo=False
         )
         
-        # Get database-specific query
         list_query, system_dbs = get_list_databases_query(creds.db_type)
         
-        # Execute query
         with temp_engine.connect() as conn:
             result = conn.execute(text(list_query))
             databases = [row[0] for row in result]
-            
-            # Filter out system databases
             user_databases = [db for db in databases if db not in system_dbs]
         
         temp_engine.dispose()
@@ -1091,11 +1181,10 @@ async def create_database(
     request: Request,
     config: DBCreate
 ):
-    """✨ NEW: Create database with support for both MySQL and PostgreSQL"""
+    """Create database with support for both MySQL and PostgreSQL"""
     print(f"[CREATE DB] Request to create {config.db_type} database: {config.database_name}")
     
     try:
-        # Validate database name (alphanumeric and underscores only)
         if not re.match(r'^[a-zA-Z0-9_]+$', config.database_name):
             raise HTTPException(
                 status_code=400,
@@ -1107,8 +1196,7 @@ async def create_database(
                 }
             )
         
-        # Check length
-        if len(config.database_name) > 63:  # PostgreSQL limit is 63, MySQL is 64
+        if len(config.database_name) > 63:
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -1119,23 +1207,13 @@ async def create_database(
                 }
             )
         
-        # Build connection URI
         db_uri = build_db_uri(config)
+        temp_engine = create_engine(db_uri, poolclass=pool.NullPool, echo=False)
         
-        # Create temporary engine
-        temp_engine = create_engine(
-            db_uri,
-            poolclass=pool.NullPool,
-            echo=False
-        )
-        
-        # Get database-specific queries
         list_query, system_dbs = get_list_databases_query(config.db_type)
         create_query = get_create_database_query(config.db_type, config.database_name)
         
-        # Check if database exists and create
         with temp_engine.connect() as conn:
-            # Check existing databases
             result = conn.execute(text(list_query))
             existing_databases = [row[0] for row in result]
             
@@ -1151,8 +1229,6 @@ async def create_database(
                     }
                 )
             
-            # Create the database
-            # For PostgreSQL, we need to commit outside of transaction
             if config.db_type == DatabaseType.POSTGRESQL:
                 conn.execute(text("COMMIT"))
                 conn.execute(text(create_query))
@@ -1172,7 +1248,6 @@ async def create_database(
     
     except HTTPException as e:
         raise e
-    
     except OperationalError as e:
         error_msg = str(e)
         print(f"[CREATE DB] OperationalError: {error_msg}")
@@ -1197,7 +1272,6 @@ async def create_database(
                     "code": "CREATION_ERROR"
                 }
             )
-    
     except Exception as e:
         error_msg = str(e)
         print(f"[CREATE DB] Unexpected error: {error_msg}")
@@ -1217,27 +1291,19 @@ async def connect_db(
     request: Request,
     config: DBSelection
 ):
-    """✨ NEW: Connect to database with support for both MySQL and PostgreSQL"""
+    """Connect to database with support for both MySQL and PostgreSQL"""
     print(f"[CONNECT] Request: host={config.host}, port={config.port}, user={config.user}, database={config.database}, type={config.db_type}")
     
     try:
-        # Build connection URI
         db_uri = build_db_uri(config, config.database)
-        
-        # Use connection pool manager
         test_engine = db_pool_manager.get_engine(db_uri, config.db_type)
         
-        # Test connection
         with test_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         
-        # Get pooled SQLDatabase instance
         test_db = db_pool_manager.get_db(db_uri, config.db_type)
-        
-        # Pre-fetch and cache schema
         schema_cache.get_schema(db_uri, test_db)
         
-        # Store in app state
         app.state.db_uri = db_uri
         app.state.db_name = config.database
         app.state.db_type = config.db_type
@@ -1291,7 +1357,6 @@ async def connect_db(
                     "code": "AUTH_FAILED"
                 }
             )
-        
         elif "Can't connect" in error_msg or "Connection refused" in error_msg or "2003" in error_msg or "could not connect" in error_msg.lower():
             raise HTTPException(
                 status_code=503,
@@ -1303,7 +1368,6 @@ async def connect_db(
                     "code": "CONNECTION_REFUSED"
                 }
             )
-        
         else:
             raise HTTPException(
                 status_code=500,
@@ -1337,10 +1401,7 @@ async def disconnect_db():
         db_uri = app.state.db_uri
         db_type = app.state.db_type if hasattr(app.state, "db_type") else "unknown"
         
-        # Clear connection pool
         db_pool_manager.clear_pool(db_uri)
-        
-        # Clear caches
         schema_cache.invalidate(db_uri)
         query_cache.clear()
         
@@ -1357,7 +1418,7 @@ async def disconnect_db():
 @app.get("/api/tables")
 @limiter.limit("30/minute")
 async def get_all_tables(request: Request):
-    """✨ UPDATED: Get list of tables with database-type awareness"""
+    """Get list of tables with database-type awareness"""
     if not hasattr(app.state, "db_uri"):
         raise HTTPException(status_code=400, detail="Database not connected")
     
@@ -1365,7 +1426,6 @@ async def get_all_tables(request: Request):
         db_type = db_pool_manager.get_db_type(app.state.db_uri)
         engine = db_pool_manager.get_engine(app.state.db_uri)
         
-        # Get tables based on database type
         if db_type == DatabaseType.POSTGRESQL:
             with engine.connect() as conn:
                 result = conn.execute(text("""
@@ -1404,7 +1464,7 @@ async def get_table_schema(
     request: Request,
     table_name: str
 ):
-    """Get schema for a specific table (works for both MySQL and PostgreSQL)"""
+    """Get schema for a specific table"""
     if not hasattr(app.state, "db_uri"):
         raise HTTPException(status_code=400, detail="Database not connected")
     
@@ -1412,7 +1472,6 @@ async def get_table_schema(
         engine = db_pool_manager.get_engine(app.state.db_uri)
         inspector = inspect(engine)
         
-        # Check if table exists
         if table_name not in inspector.get_table_names():
             raise HTTPException(
                 status_code=404,
@@ -1420,17 +1479,12 @@ async def get_table_schema(
             )
         
         columns = inspector.get_columns(table_name)
-
-        # Get Primary key constraints
         pk_constraint = inspector.get_pk_constraint(table_name)
         primary_keys = pk_constraint.get('constrained_columns', []) if pk_constraint else []
-
         fk_constraints = inspector.get_foreign_keys(table_name)
         foreign_keys = []
         for fk in fk_constraints:
             foreign_keys.extend(fk.get('constrained_columns', []))
-        
-        # Get unique constraints
         unique_constraints = inspector.get_unique_constraints(table_name)
         unique_columns = []
         for uc in unique_constraints:
@@ -1439,8 +1493,6 @@ async def get_table_schema(
         schema_info = []
         for col in columns:
             col_name = col['name']
-            
-            # Determine key type
             key = None
             if col_name in primary_keys:
                 key = 'PRI'
@@ -1483,7 +1535,7 @@ async def chat_endpoint(
     request: Request,
     chat_request: ChatRequest
 ):
-    """✨ UPDATED: Chat endpoint with database-type awareness"""
+    """Chat endpoint with database-type awareness"""
     if not hasattr(app.state, "db_uri"):
         raise HTTPException(status_code=400, detail="Database not connected")
     
@@ -1494,16 +1546,10 @@ async def chat_endpoint(
     ]
     
     try:
-        # Get database type
         db_type = db_pool_manager.get_db_type(app.state.db_uri) or app.state.db_type
-        
-        # Use pooled database connection
         db = db_pool_manager.get_db(app.state.db_uri, db_type)
-        
-        # Get cached schema
         cached_schema = schema_cache.get_schema(app.state.db_uri, db)
         
-        # Get response with database-aware handling
         response = get_response(
             chat_request.question,
             db,
@@ -1554,7 +1600,8 @@ async def confirm_sql_action(
             "message": str(e)
         }
 
-# ============= USER MANAGEMENT ENDPOINTS (Same as before) =============
+# ============= [Continue with all other endpoints - user management, etc.] =============
+# [The rest of your endpoints remain exactly the same - just copy them from your original file]
 
 @app.post("/api/send-otp")
 @limiter.limit("3/minute")
@@ -1666,9 +1713,6 @@ async def login_for_access_token(
             "gender": user.gender
         }
     }
-
-# [Continue with remaining endpoints: forgot-password, reset-password, chat-sessions, etc.]
-# These remain the same as in your original code...
 
 @app.post("/api/forgot-password")
 @limiter.limit("3/minute")
@@ -1905,23 +1949,27 @@ async def resend_reset_otp(
 @limiter.limit("60/minute")
 async def get_chat_sessions(
     request: Request,
-    user_id: int = Query(...)
+    user_id: int = Query(...),
+    db: Session = Depends(get_db) 
 ):
     """Get all chat sessions for a specific user"""
-    db_session = SessionLocal()
-    try:
-        sessions = db_session.query(ChatSession).filter(
+    try:  
+        sessions = db.query(ChatSession).filter(  
             ChatSession.user_id == user_id
         ).order_by(ChatSession.id.desc()).all()
         
         result = []
         for session in sessions:
+            # 🔥 FIX: Ensure is_starred is always read correctly
+            is_starred_value = getattr(session, 'is_starred', 0)
+            
             result.append({
                 "id": session.id,
                 "user_id": session.user_id,
                 "title": session.title,
                 "messages": json.loads(session.messages),
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "isStarred": bool(is_starred_value)  # Convert 0/1 to False/True
             })
         
         print(f"[GET SESSIONS] Found {len(result)} sessions for user {user_id}")
@@ -1929,29 +1977,27 @@ async def get_chat_sessions(
     except Exception as e:
         print(f"[GET SESSIONS ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch chat sessions: {str(e)}")
-    finally:
-        db_session.close()
-
-@app.post("/api/chat-sessions")
+    
 @limiter.limit("30/minute")
 async def create_chat_session(
     request: Request,
-    session: dict
+    session: dict,
+    db: Session = Depends(get_db)  # ← CHANGED: Use dependency injection
 ):
     """Create a new chat session for a user"""
-    db_session = SessionLocal()
-    try:
+    try:  # ← CHANGED: Simplified try block
         if not session.get("user_id"):
             raise HTTPException(status_code=400, detail="user_id is required")
         
         new_session = ChatSession(
             user_id=session.get("user_id"),
             title=session.get("title", "Untitled Chat"),
-            messages=json.dumps(session.get("messages", []))
+            messages=json.dumps(session.get("messages", [])),
+            is_starred=1 if session.get("isStarred", False) else 0  # ← ADD THIS LINE
         )
-        db_session.add(new_session)
-        db_session.commit()
-        db_session.refresh(new_session)
+        db.add(new_session)  # ← CHANGED: Use db from dependency
+        db.commit()
+        db.refresh(new_session)
         
         print(f"[CREATE SESSION] Created session {new_session.id} for user {new_session.user_id}")
         
@@ -1960,16 +2006,15 @@ async def create_chat_session(
             "user_id": new_session.user_id,
             "title": new_session.title,
             "messages": json.loads(new_session.messages),
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "isStarred": bool(new_session.is_starred)  # ← ADD THIS LINE
         }
     except HTTPException as e:
         raise e
     except Exception as e:
-        db_session.rollback()
+        db.rollback()  # ← CHANGED: Use db from dependency
         print(f"[CREATE SESSION ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
-    finally:
-        db_session.close()
 
 @app.put("/api/chat-sessions/{session_id}")
 @limiter.limit("60/minute")
@@ -2051,6 +2096,95 @@ async def delete_chat_session(
     finally:
         db_session.close()
 
+@app.put("/api/chat-sessions/{session_id}/star")
+@limiter.limit("30/minute")
+async def toggle_star_chat_session(
+    request: Request,
+    session_id: int,
+    star_request: dict,
+    db: Session = Depends(get_db)
+):
+    """Toggle star/favorite status for a chat session"""
+    try:
+        user_id = star_request.get("user_id")
+        is_starred = star_request.get("is_starred", False)
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        
+        session = db.query(ChatSession).filter(
+            ChatSession.id == session_id,
+            ChatSession.user_id == user_id
+        ).first()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        
+        # Update star status
+        session.is_starred = 1 if is_starred else 0
+        db.commit()
+        
+        print(f"[TOGGLE STAR] Session {session_id} starred={is_starred} for user {user_id}")
+        
+        return {
+            "success": True,
+            "message": "Star status updated",
+            "is_starred": is_starred
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db.rollback()
+        print(f"[TOGGLE STAR ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update star status: {str(e)}")
+
+@app.put("/api/chat-sessions/{session_id}/rename")
+@limiter.limit("30/minute")
+async def rename_chat_session(
+    request: Request,
+    session_id: int,
+    rename_request: dict,
+    db: Session = Depends(get_db)
+):
+    """Rename a chat session"""
+    try:
+        user_id = rename_request.get("user_id")
+        new_title = rename_request.get("title")
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        
+        if not new_title or not new_title.strip():
+            raise HTTPException(status_code=400, detail="title is required")
+        
+        session = db.query(ChatSession).filter(
+            ChatSession.id == session_id,
+            ChatSession.user_id == user_id
+        ).first()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        
+        # Update title
+        session.title = new_title.strip()
+        db.commit()
+        
+        print(f"[RENAME SESSION] Session {session_id} renamed to '{new_title}' for user {user_id}")
+        
+        return {
+            "success": True,
+            "message": "Chat renamed successfully",
+            "title": new_title.strip()
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        db.rollback()
+        print(f"[RENAME SESSION ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to rename chat session: {str(e)}")
+    
 @app.post("/api/send-email-change-otp")
 @limiter.limit("3/minute")
 async def send_email_change_otp_endpoint(
