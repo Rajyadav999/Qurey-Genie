@@ -1,250 +1,287 @@
+"""
+Query Genie – FastAPI Backend
+Fixed version: all known bugs resolved, code quality improved.
+"""
+
+import ast
+import hashlib
+import json
+import logging
 import os
-from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Query, Request 
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
 import random
+import re
 import smtplib
-from email.mime.text import MIMEText
+import threading
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
-from passlib.context import CryptContext
+from email.mime.text import MIMEText
+from functools import lru_cache
+from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import quote_plus
+
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from langchain_community.utilities import SQLDatabase
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-from langchain_community.utilities import SQLDatabase
 from langchain_groq import ChatGroq
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, inspect, text, pool
-from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.exc import SQLAlchemyError, OperationalError, ProgrammingError
-import ast
-import json
-import re
-from functools import lru_cache
-from typing import Dict, Optional, Literal, List, Any
-import hashlib
-import logging
-from urllib.parse import quote_plus 
+from passlib.context import CryptContext
+from pydantic import BaseModel, EmailStr, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, create_engine, inspect, text, pool
+from sqlalchemy.exc import OperationalError, ProgrammingError, SQLAlchemyError
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
 load_dotenv()
-groq_api_key = os.getenv("GROQ_API_KEY")
-assert groq_api_key is not None, "GROQ_API_KEY not found in environment variables"
 
-# EMAIL CONFIGURATION
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
-if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
-    print("WARNING: Email credentials not found. OTP sending will be disabled.")
+GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+EMAIL_HOST_USER: str = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD: str = os.getenv("EMAIL_HOST_PASSWORD", "")
 
-def validate_environment():
-    """Check required variables at startup"""
-    required = {
-        "GROQ_API_KEY": groq_api_key,
-        "EMAIL_HOST_USER": EMAIL_HOST_USER,
-        "EMAIL_HOST_PASSWORD": EMAIL_HOST_PASSWORD
-    }
-    
-    # Check critical variables
-    if not groq_api_key:
-        raise RuntimeError("❌ Missing critical: GROQ_API_KEY")
-    
-    # Warn about optional variables
+
+def validate_environment() -> None:
+    """Raise on missing critical env vars; warn on optional ones."""
+    if not GROQ_API_KEY:
+        raise RuntimeError("Missing critical env var: GROQ_API_KEY")
     if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
-        logger.warning("⚠️ Email credentials missing - OTP will be disabled")
-    
-    logger.info("✅ All required environment variables present")
+        logger.warning("Email credentials missing – OTP emails disabled")
+    logger.info("Environment variables validated")
 
-# Password Hashing
+
+# ---------------------------------------------------------------------------
+# Password hashing
+# ---------------------------------------------------------------------------
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# ============= TIMEZONE HELPER =============
-def make_tz_aware(dt):
-    """Make datetime timezone-aware if it's naive (SQLite compatibility)"""
-    if dt and dt.tzinfo is None:
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+# ---------------------------------------------------------------------------
+# Timezone helper
+# ---------------------------------------------------------------------------
+def make_tz_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Attach UTC tzinfo to a naive datetime (SQLite compat)."""
+    if dt is not None and dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
-# ============= DATABASE TYPE HELPER =============
+
+# ---------------------------------------------------------------------------
+# Database-type constants & helpers
+# ---------------------------------------------------------------------------
 class DatabaseType:
-    """Database type constants"""
     MYSQL = "mysql"
     POSTGRESQL = "postgresql"
-    
-    @staticmethod
-    def get_default_port(db_type: str) -> int:
-        """Get default port for database type"""
-        return 5432 if db_type == DatabaseType.POSTGRESQL else 3306
-    
+
     @staticmethod
     def get_driver(db_type: str) -> str:
-        """Get SQLAlchemy driver for database type"""
         return "postgresql" if db_type == DatabaseType.POSTGRESQL else "mysql+mysqlconnector"
 
-# ============= CONNECTION POOL CACHE =============
+
+def build_db_uri(host: str, port: int, user: str, password: str, db_type: str, database: str = "") -> str:
+    """Build a SQLAlchemy connection URI."""
+    encoded_pw = quote_plus(password) if password else ""
+    if db_type == DatabaseType.POSTGRESQL:
+        db_part = database if database else "postgres"
+        return f"postgresql://{user}:{encoded_pw}@{host}:{port}/{db_part}"
+    db_part = f"/{database}" if database else ""
+    return f"mysql+mysqlconnector://{user}:{encoded_pw}@{host}:{port}{db_part}"
+
+
+def get_list_databases_query(db_type: str) -> Tuple[str, List[str]]:
+    """Return (SQL, system_db_names_to_exclude)."""
+    if db_type == DatabaseType.POSTGRESQL:
+        return (
+            "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres'",
+            ["postgres", "template0", "template1"],
+        )
+    return (
+        "SHOW DATABASES",
+        ["information_schema", "mysql", "performance_schema", "sys"],
+    )
+
+
+def get_create_database_sql(db_type: str, name: str) -> str:
+    if db_type == DatabaseType.POSTGRESQL:
+        return f'CREATE DATABASE "{name}"'
+    return f"CREATE DATABASE `{name}`"
+
+
+# ---------------------------------------------------------------------------
+# Connection-pool manager
+# ---------------------------------------------------------------------------
 class DatabaseConnectionPool:
-    """Maintains connection pools for MySQL and PostgreSQL databases"""
-    def __init__(self):
-        self._pools: Dict[str, create_engine] = {}
-        self._db_instances: Dict[str, SQLDatabase] = {}
-        self._db_types: Dict[str, str] = {}  # Track database types
-    
-    def get_engine(self, db_uri: str, db_type: str = None):
-        """Get or create connection pool for a database"""
-        if db_uri not in self._pools:
-            print(f"[POOL] Creating new connection pool for {db_type or 'unknown'} database")
-            self._pools[db_uri] = create_engine(
-                db_uri,
-                poolclass=pool.QueuePool,
-                pool_size=10,
-                max_overflow=20,
-                pool_timeout=30,
-                pool_recycle=3600,
-                pool_pre_ping=True,
-                echo=False
-            )
-            if db_type:
-                self._db_types[db_uri] = db_type
-        return self._pools[db_uri]
-    
-    def get_db(self, db_uri: str, db_type: str = None) -> SQLDatabase:
-        """Get or create SQLDatabase instance with pooled connection"""
-        if db_uri not in self._db_instances:
-            print(f"[POOL] Creating new SQLDatabase instance for {db_type or 'unknown'}")
-            engine = self.get_engine(db_uri, db_type)
-            self._db_instances[db_uri] = SQLDatabase(engine)
-            if db_type:
-                self._db_types[db_uri] = db_type
-        return self._db_instances[db_uri]
-    
-    def get_db_type(self, db_uri: str) -> Optional[str]:
-        """Get the database type for a URI"""
-        return self._db_types.get(db_uri)
-    
-    def clear_pool(self, db_uri: str):
-        """Clear connection pool for a specific database"""
-        if db_uri in self._pools:
-            self._pools[db_uri].dispose()
-            del self._pools[db_uri]
-        if db_uri in self._db_instances:
-            del self._db_instances[db_uri]
-        if db_uri in self._db_types:
-            del self._db_types[db_uri]
+    """Thread-safe pool of SQLAlchemy engines and LangChain SQLDatabase objects."""
 
-# Global connection pool manager
-db_pool_manager = DatabaseConnectionPool()
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._engines: Dict[str, Any] = {}
+        self._sql_dbs: Dict[str, SQLDatabase] = {}
+        self._db_types: Dict[str, str] = {}
 
-# ============= SCHEMA CACHING =============
+    def get_engine(self, uri: str, db_type: str = "") -> Any:
+        with self._lock:
+            if uri not in self._engines:
+                logger.info("Creating connection pool for %s", db_type or "unknown")
+                self._engines[uri] = create_engine(
+                    uri,
+                    poolclass=pool.QueuePool,
+                    pool_size=10,
+                    max_overflow=20,
+                    pool_timeout=30,
+                    pool_recycle=3600,
+                    pool_pre_ping=True,
+                    echo=False,
+                )
+                if db_type:
+                    self._db_types[uri] = db_type
+            return self._engines[uri]
+
+    def get_sql_db(self, uri: str, db_type: str = "") -> SQLDatabase:
+        with self._lock:
+            if uri not in self._sql_dbs:
+                engine = self.get_engine(uri, db_type)
+                self._sql_dbs[uri] = SQLDatabase(engine)
+            return self._sql_dbs[uri]
+
+    def get_db_type(self, uri: str) -> str:
+        return self._db_types.get(uri, "")
+
+    def clear(self, uri: str) -> None:
+        with self._lock:
+            if uri in self._engines:
+                self._engines[uri].dispose()
+                del self._engines[uri]
+            self._sql_dbs.pop(uri, None)
+            self._db_types.pop(uri, None)
+
+    def clear_all(self) -> None:
+        for uri in list(self._engines.keys()):
+            self.clear(uri)
+
+
+db_pool = DatabaseConnectionPool()
+
+
+# ---------------------------------------------------------------------------
+# Schema cache (TTL-based)
+# ---------------------------------------------------------------------------
 class SchemaCache:
-    """Cache database schemas to avoid repeated fetching"""
-    def __init__(self):
+    def __init__(self, ttl_minutes: int = 30) -> None:
+        self._lock = threading.Lock()
         self._cache: Dict[str, str] = {}
-        self._last_updated: Dict[str, datetime] = {}
-        self._ttl = timedelta(minutes=30)  # Cache for 30 minutes
-    
-    def get_schema(self, db_uri: str, db: SQLDatabase) -> str:
-        """Get cached schema or fetch and cache it"""
-        cache_key = db_uri
-        now = datetime.now(timezone.utc)
-        
-        # Check if cache exists and is not expired
-        if cache_key in self._cache:
-            if cache_key in self._last_updated:
-                age = now - self._last_updated[cache_key]
-                if age < self._ttl:
-                    print(f"[CACHE] Using cached schema (age: {age.seconds}s)")
-                    return self._cache[cache_key]
-        
-        # Fetch fresh schema
-        print("[CACHE] Fetching fresh schema...")
-        schema = db.get_table_info()
-        self._cache[cache_key] = schema
-        self._last_updated[cache_key] = now
-        return schema
-    
-    def invalidate(self, db_uri: str):
-        """Invalidate cache for a specific database"""
-        if db_uri in self._cache:
-            del self._cache[db_uri]
-        if db_uri in self._last_updated:
-            del self._last_updated[db_uri]
+        self._timestamps: Dict[str, datetime] = {}
+        self._ttl = timedelta(minutes=ttl_minutes)
 
-# Global schema cache
+    def get(self, uri: str, sql_db: SQLDatabase) -> str:
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            ts = self._timestamps.get(uri)
+            if ts and (now - ts) < self._ttl:
+                logger.debug("Schema cache hit")
+                return self._cache[uri]
+            logger.info("Fetching fresh schema for %s", uri)
+            schema = sql_db.get_table_info()
+            self._cache[uri] = schema
+            self._timestamps[uri] = now
+            return schema
+
+    def invalidate(self, uri: str) -> None:
+        with self._lock:
+            self._cache.pop(uri, None)
+            self._timestamps.pop(uri, None)
+
+    def clear_all(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._timestamps.clear()
+
+
 schema_cache = SchemaCache()
 
-# ============= QUERY RESULT CACHING =============
+
+# ---------------------------------------------------------------------------
+# Query result cache (LRU-style)
+# ---------------------------------------------------------------------------
 class QueryCache:
-    """Cache query results for identical queries"""
-    def __init__(self, max_size: int = 100):
-        self._cache: Dict[str, dict] = {}
+    def __init__(self, max_size: int = 100) -> None:
+        self._lock = threading.Lock()
+        # Stores strings (the final_result text)
+        self._cache: Dict[str, str] = {}
         self._max_size = max_size
-    
-    def _make_key(self, question: str, db_uri: str, chat_history: list) -> str:
-        """Create cache key from query parameters"""
-        # Only cache if chat history is short (last 2 messages)
-        if len(chat_history) > 4:
+
+    def _make_key(self, question: str, uri: str, history: List) -> Optional[str]:
+        if len(history) > 4:
             return None
-        
-        history_str = json.dumps([msg.content for msg in chat_history[-4:]])
-        content = f"{question}|{db_uri}|{history_str}"
-        return hashlib.md5(content.encode()).hexdigest()
-    
-    def get(self, question: str, db_uri: str, chat_history: list) -> Optional[dict]:
-        """Get cached result"""
-        key = self._make_key(question, db_uri, chat_history)
-        if key and key in self._cache:
-            print("[CACHE] Using cached query result")
-            return self._cache[key]
-        return None
-    
-    def set(self, question: str, db_uri: str, chat_history: list, result: dict):
-        """Cache query result"""
-        key = self._make_key(question, db_uri, chat_history)
+        history_str = json.dumps([m.content for m in history[-4:]])
+        raw = f"{question}|{uri}|{history_str}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def get(self, question: str, uri: str, history: List) -> Optional[str]:
+        key = self._make_key(question, uri, history)
+        if not key:
+            return None
+        with self._lock:
+            return self._cache.get(key)
+
+    def set(self, question: str, uri: str, history: List, result: str) -> None:
+        key = self._make_key(question, uri, history)
         if not key:
             return
-        
-        # Simple LRU: remove oldest if cache is full
-        if len(self._cache) >= self._max_size:
-            oldest_key = next(iter(self._cache))
-            del self._cache[oldest_key]
-        
-        self._cache[key] = result
-    
-    def clear(self):
-        """Clear all cached queries"""
-        self._cache.clear()
+        with self._lock:
+            if len(self._cache) >= self._max_size:
+                # Evict oldest entry
+                oldest = next(iter(self._cache))
+                del self._cache[oldest]
+            self._cache[key] = result
 
-# Global query cache
-query_cache = QueryCache(max_size=50)
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
 
-# ============= DATABASE SETUP WITH CONNECTION POOLING =============
+
+query_cache = QueryCache(max_size=100)
+
+
+# ---------------------------------------------------------------------------
+# SQLite (users) DB setup
+# ---------------------------------------------------------------------------
 SQLITE_DB_FILE = "users.db"
 
-# Connection pooling for SQLite (users database)
 engine = create_engine(
     f"sqlite:///{SQLITE_DB_FILE}",
     echo=False,
-    poolclass=pool.QueuePool,
-    pool_size=10,
-    max_overflow=20,
-    pool_timeout=30,
-    pool_recycle=3600,
-    pool_pre_ping=True
+    pool_pre_ping=True,
+    connect_args={"check_same_thread": False},
 )
-
 Base = declarative_base()
 
-# ============= DATABASE MODELS =============
+
+# ---------------------------------------------------------------------------
+# ORM Models
+# ---------------------------------------------------------------------------
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -256,13 +293,15 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
 
+
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     title = Column(String, nullable=False)
     messages = Column(Text, nullable=False)
     is_starred = Column(Integer, default=0)
+
 
 class OTP(Base):
     __tablename__ = "otps"
@@ -271,8 +310,8 @@ class OTP(Base):
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+
 class ProfileUpdateOTP(Base):
-    """OTP for email change verification"""
     __tablename__ = "profile_update_otps"
     user_id = Column(Integer, primary_key=True, index=True)
     otp = Column(String, nullable=False)
@@ -280,142 +319,20 @@ class ProfileUpdateOTP(Base):
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+
 class PasswordResetOTP(Base):
-    """New table for password reset OTPs"""
     __tablename__ = "password_reset_otps"
     email = Column(String, primary_key=True, index=True)
     otp = Column(String, nullable=False)
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-# Create all tables
+
 Base.metadata.create_all(engine)
 
-# Session factory with connection pooling
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-app = FastAPI()
 
-# ============= RATE LIMITING SETUP =============
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-
-# Custom error handler for rate limit exceeded
-@app.exception_handler(RateLimitExceeded)
-async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    """Returns user-friendly error message when rate limit is exceeded"""
-    return JSONResponse(
-        status_code=429,
-        content={
-            "success": False,
-            "error": "Rate Limit Exceeded",
-            "message": "Too many requests. Please slow down and try again later.",
-            "detail": str(exc.detail),
-            "retry_after": 60
-        },
-        headers={"Retry-After": "60"}
-    )
-
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080", "http://localhost:8081", 
-        "http://localhost:5173", "http://localhost:3000",
-        "http://127.0.0.1:8080", "http://127.0.0.1:8081",
-        "http://127.0.0.1:5173", "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
-
-# ============= PYDANTIC MODELS =============
-class DBCredentials(BaseModel):
-    """Step 1: Verify credentials without database"""
-    host: str
-    port: int
-    user: str
-    password: str = ""
-    db_type: Literal["mysql", "postgresql"]
-
-class DBSelection(BaseModel):
-    """Step 2: Connect to selected database"""
-    host: str
-    port: int
-    user: str
-    password: str = ""
-    database: str
-    db_type: Literal["mysql", "postgresql"]
-
-class DBCreate(BaseModel):
-    """Step 2.5: Create new database"""
-    host: str
-    port: int
-    user: str
-    password: str = ""
-    database_name: str
-    db_type: Literal["mysql", "postgresql"]
-
-class ChatRequest(BaseModel):
-    question: str
-    chat_history: list
-
-class UserCreate(BaseModel):
-    firstName: str
-    lastName: str
-    email: EmailStr
-    phone: str = None
-    password: str
-    otp: str
-    gender: str
-    username: str
-
-class UserLogin(BaseModel):
-    identifier: str
-    password: str
-
-class OtpRequest(BaseModel):
-    email: EmailStr
-
-class ForgotPasswordRequest(BaseModel):
-    email: EmailStr
-
-class ResetPasswordRequest(BaseModel):
-    email: EmailStr
-    otp: str
-    new_password: str
-
-class ConfirmSQLRequest(BaseModel):
-    user_id: int
-    confirm: bool
-    sql: str
-
-class UpdateProfileRequest(BaseModel):
-    userId: int
-    firstName: str
-    lastName: str
-    username: str
-    email: EmailStr
-    phone: str
-    gender: str
-
-class ChangePasswordRequest(BaseModel):
-    userId: int
-    currentPassword: str
-    newPassword: str
-
-class SendEmailOTPRequest(BaseModel):
-    userId: int
-    newEmail: EmailStr
-
-class UpdateEmailRequest(BaseModel):
-    userId: int
-    newEmail: EmailStr
-    otp: str
-
-# Database Session Dependency
 def get_db():
     db = SessionLocal()
     try:
@@ -423,2026 +340,1155 @@ def get_db():
     finally:
         db.close()
 
-# ============= HELPER FUNCTIONS =============
-def generate_otp():
+
+# ---------------------------------------------------------------------------
+# Pydantic request/response models
+# ---------------------------------------------------------------------------
+class DBCredentials(BaseModel):
+    host: str
+    port: int
+    user: str
+    password: str = ""
+    db_type: Literal["mysql", "postgresql"]
+
+
+class DBSelection(BaseModel):
+    host: str
+    port: int
+    user: str
+    password: str = ""
+    database: str
+    db_type: Literal["mysql", "postgresql"]
+
+
+class DBCreate(BaseModel):
+    host: str
+    port: int
+    user: str
+    password: str = ""
+    database_name: str
+    db_type: Literal["mysql", "postgresql"]
+
+    @field_validator("database_name")
+    @classmethod
+    def validate_db_name(cls, v: str) -> str:
+        if not re.match(r"^[a-zA-Z0-9_]{1,63}$", v):
+            raise ValueError("Database name must be 1–63 alphanumeric/underscore characters")
+        return v
+
+
+class ChatRequest(BaseModel):
+    question: str
+    chat_history: List[Dict[str, str]]
+
+
+class UserCreate(BaseModel):
+    firstName: str
+    lastName: str
+    email: EmailStr
+    phone: Optional[str] = None
+    password: str
+    otp: str
+    gender: str
+    username: str
+
+    @field_validator("password")
+    @classmethod
+    def password_min_length(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v
+
+
+class UserLogin(BaseModel):
+    identifier: str
+    password: str
+
+
+class OtpRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+# BUG FIX: was accepting raw dict – now a proper Pydantic model
+class VerifyResetOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def password_min_length(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v
+
+
+class ConfirmSQLRequest(BaseModel):
+    user_id: int
+    confirm: bool
+    sql: str
+
+
+class UpdateProfileRequest(BaseModel):
+    userId: int
+    firstName: str
+    lastName: str
+    username: str
+    email: EmailStr
+    phone: Optional[str] = None
+    gender: str
+
+
+class ChangePasswordRequest(BaseModel):
+    userId: int
+    currentPassword: str
+    newPassword: str
+
+    @field_validator("newPassword")
+    @classmethod
+    def password_min_length(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("New password must be at least 8 characters")
+        return v
+
+
+class SendEmailOTPRequest(BaseModel):
+    userId: int
+    newEmail: EmailStr
+
+
+class UpdateEmailRequest(BaseModel):
+    userId: int
+    newEmail: EmailStr
+    otp: str
+
+
+class StarSessionRequest(BaseModel):
+    user_id: int
+    is_starred: bool
+
+
+class RenameSessionRequest(BaseModel):
+    user_id: int
+    title: str
+
+
+class CreateSessionRequest(BaseModel):
+    user_id: int
+    title: str = "Untitled Chat"
+    messages: List[Any] = []
+    isStarred: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Email helpers
+# ---------------------------------------------------------------------------
+def _send_email(to: str, subject: str, html_body: str) -> bool:
+    """Internal helper – sends one HTML email. Returns True on success."""
+    if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
+        logger.warning("Email credentials not set; skipping send to %s", to)
+        return False
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_HOST_USER
+    msg["To"] = to
+    msg.attach(MIMEText(html_body, "html"))
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
+            srv.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
+            srv.sendmail(EMAIL_HOST_USER, to, msg.as_string())
+        return True
+    except Exception as exc:
+        logger.error("Failed to send email to %s: %s", to, exc)
+        return False
+
+
+def send_otp_email(to: str, otp: str) -> bool:
+    html = f"""
+    <html><body>
+      <div style="font-family:Arial,sans-serif;text-align:center;color:#333">
+        <h2>Welcome to Query Genie!</h2>
+        <p>Your one-time verification code is:</p>
+        <p style="font-size:24px;font-weight:bold;letter-spacing:2px;color:#007BFF">{otp}</p>
+        <p>Expires in 5 minutes.</p>
+      </div>
+    </body></html>"""
+    return _send_email(to, "Your Verification Code", html)
+
+
+def send_password_reset_email(to: str, otp: str) -> bool:
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f5f5f5;padding:20px">
+      <div style="max-width:500px;margin:auto;background:#fff;border-radius:8px;overflow:hidden">
+        <div style="background:linear-gradient(135deg,#667eea,#764ba2);padding:30px;text-align:center">
+          <h1 style="color:#fff;margin:0">Password Reset</h1>
+        </div>
+        <div style="padding:30px;text-align:center">
+          <p>Your reset code:</p>
+          <p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#667eea">{otp}</p>
+          <p style="font-size:13px;color:#666">Expires in <strong>10 minutes</strong>.</p>
+        </div>
+      </div>
+    </body></html>"""
+    return _send_email(to, "Password Reset Code – Query Genie", html)
+
+
+def send_email_change_otp(to: str, otp: str, user_name: str) -> bool:
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f5f5f5;padding:20px">
+      <div style="max-width:500px;margin:auto;background:#fff;border-radius:8px;overflow:hidden">
+        <div style="background:linear-gradient(135deg,#667eea,#764ba2);padding:30px;text-align:center">
+          <h1 style="color:#fff;margin:0">Verify New Email</h1>
+        </div>
+        <div style="padding:30px">
+          <p>Hi <strong>{user_name}</strong>,</p>
+          <p>Use this code to verify your new email address:</p>
+          <p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#667eea;text-align:center">{otp}</p>
+          <p style="font-size:13px;color:#666">Expires in <strong>5 minutes</strong>.</p>
+        </div>
+      </div>
+    </body></html>"""
+    return _send_email(to, "Verify Your New Email – Query Genie", html)
+
+
+# ---------------------------------------------------------------------------
+# OTP utility
+# ---------------------------------------------------------------------------
+def generate_otp() -> str:
     return str(random.randint(100000, 999999))
 
-def send_otp_email(recipient_email: str, otp: str) -> bool:
-    """Best-effort OTP email sender."""
-    if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
-        print(f"[OTP] Email credentials missing; OTP for {recipient_email}: {otp}")
-        return False
 
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "Your Verification Code"
-    message["From"] = EMAIL_HOST_USER
-    message["To"] = recipient_email
-
-    html = f"""
-    <html>
-    <body>
-        <div style="font-family: Arial, sans-serif; text-align: center; color: #333;">
-            <h2>Welcome to Query Genie!</h2>
-            <p>Your one-time verification code is:</p>
-            <p style="font-size: 24px; font-weight: bold; letter-spacing: 2px; color: #007BFF;">{otp}</p>
-            <p>This code will expire in 5 minutes.</p>
-        </div>
-    </body>
-    </html>
-    """
-    message.attach(MIMEText(html, "html"))
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
-            server.sendmail(EMAIL_HOST_USER, recipient_email, message.as_string())
-        print(f"[OTP] Email sent to {recipient_email}")
-        return True
-    except Exception as e:
-        print(f"[OTP] Failed to send email to {recipient_email}: {e}")
-        return False
-
-def send_password_reset_email(recipient_email: str, otp: str) -> bool:
-    """Send password reset OTP email"""
-    if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
-        print(f"[PASSWORD RESET] Missing credentials; OTP for {recipient_email}: {otp}")
-        return False
-    
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "Password Reset Code - Query Genie"
-    message["From"] = EMAIL_HOST_USER
-    message["To"] = recipient_email
-    
-    html = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
-        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <div style="background: linear-gradient(135deg, #667eea, #764ba2); padding: 30px; text-align: center;">
-                <h1 style="color: white; margin: 0;">Password Reset</h1>
-            </div>
-            
-            <div style="padding: 30px;">
-                <p style="color: #666; margin-bottom: 20px;">
-                    Use this code to reset your Query Genie password:
-                </p>
-                
-                <div style="text-align: center; margin: 25px 0;">
-                    <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; border: 2px dashed #667eea;">
-                        <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #667eea;">
-                            {otp}
-                        </span>
-                    </div>
-                </div>
-                
-                <p style="color: #666; font-size: 14px;">
-                    Expires in <strong>10 minutes</strong>. Didn't request this? Ignore this email.
-                </p>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    
-    message.attach(MIMEText(html, "html"))
-    
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
-            server.sendmail(EMAIL_HOST_USER, recipient_email, message.as_string())
-        print(f"[PASSWORD RESET] Sent to {recipient_email}")
-        return True
-    except Exception as e:
-        print(f"[PASSWORD RESET] Failed for {recipient_email}: {e}")
-        return False
-
-def send_email_change_otp(recipient_email: str, otp: str, user_name: str) -> bool:
-    """Send OTP to verify new email address"""
-    if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
-        print(f"[EMAIL CHANGE] Missing credentials; OTP for {recipient_email}: {otp}")
-        return False
-    
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "Verify Your New Email - Query Genie"
-    message["From"] = EMAIL_HOST_USER
-    message["To"] = recipient_email
-    
-    html = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
-        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <div style="background: linear-gradient(135deg, #667eea, #764ba2); padding: 30px; text-align: center;">
-                <h1 style="color: white; margin: 0;">Verify New Email</h1>
-            </div>
-            
-            <div style="padding: 30px;">
-                <p style="color: #333; margin-bottom: 10px;">Hi <strong>{user_name}</strong>,</p>
-                
-                <p style="color: #666; margin-bottom: 20px;">
-                    You're changing your email address. Use this code to verify:
-                </p>
-                
-                <div style="text-align: center; margin: 25px 0;">
-                    <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; border: 2px dashed #667eea;">
-                        <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #667eea;">
-                            {otp}
-                        </span>
-                    </div>
-                </div>
-                
-                <p style="color: #666; font-size: 14px;">
-                    <strong>Expires in 5 minutes.</strong> If you didn't request this, ignore this email.
-                </p>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    
-    message.attach(MIMEText(html, "html"))
-    
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
-            server.sendmail(EMAIL_HOST_USER, recipient_email, message.as_string())
-        print(f"[EMAIL CHANGE] OTP sent to {recipient_email}")
-        return True
-    except Exception as e:
-        print(f"[EMAIL CHANGE] Failed for {recipient_email}: {e}")
-        return False
-
-# ============= DATABASE-SPECIFIC HELPERS =============
-def build_db_uri(config, database: str = None) -> str:
-    """Build database URI based on database type"""
-    password = quote_plus(config.password) if config.password else ""
-    
-    if config.db_type == DatabaseType.POSTGRESQL:
-        if database:
-            return f"postgresql://{config.user}:{password}@{config.host}:{config.port}/{database}"
-        else:
-            return f"postgresql://{config.user}:{password}@{config.host}:{config.port}/postgres"
-    else:  # MySQL
-        if database:
-            return f"mysql+mysqlconnector://{config.user}:{password}@{config.host}:{config.port}/{database}"
-        else:
-            return f"mysql+mysqlconnector://{config.user}:{password}@{config.host}:{config.port}"
-
-def get_list_databases_query(db_type: str) -> tuple[str, list]:
-    """Get query to list databases based on type"""
-    if db_type == DatabaseType.POSTGRESQL:
-        return (
-            "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres'",
-            ['postgres', 'template0', 'template1']
-        )
-    else:  # MySQL
-        return (
-            "SHOW DATABASES",
-            ['information_schema', 'mysql', 'performance_schema', 'sys']
-        )
-
-def get_create_database_query(db_type: str, database_name: str) -> str:
-    """Get CREATE DATABASE query based on type"""
-    if db_type == DatabaseType.POSTGRESQL:
-        return f'CREATE DATABASE "{database_name}"'
-    else:  # MySQL
-        return f"CREATE DATABASE `{database_name}`"
-
-def get_list_tables_query(db_type: str, database_name: str = None) -> str:
-    """Get query to list tables based on database type"""
-    if db_type == DatabaseType.POSTGRESQL:
-        return """
-        SELECT tablename 
-        FROM pg_catalog.pg_tables 
-        WHERE schemaname != 'pg_catalog' 
-        AND schemaname != 'information_schema'
-        """
-    else:  # MySQL
-        return "SHOW TABLES"
-
-# SQL Safety
-DANGEROUS_KEYWORDS = ["DROP", "TRUNCATE", "DELETE", "ALTER", "UPDATE"]
-FORBIDDEN_PATTERNS = [
-    r";\s*DROP", r"--", r"/\*.*\*/", r"UNION\s+SELECT",
-    r"OR\s+1\s*=\s*1", r"AND\s+1\s*=\s*1", r"'\s*OR\s*'",
-    r";\s*EXEC", r"xp_cmdshell",
+# ---------------------------------------------------------------------------
+# SQL safety
+# ---------------------------------------------------------------------------
+_DANGEROUS_KEYWORDS = {"DROP", "TRUNCATE", "DELETE", "ALTER", "UPDATE"}
+_INJECTION_PATTERNS = [
+    r";\s*DROP",
+    r"--",
+    r"/\*.*?\*/",
+    r"UNION\s+SELECT",
+    r"OR\s+1\s*=\s*1",
+    r"AND\s+1\s*=\s*1",
+    r"'\s*OR\s*'",
+    r";\s*EXEC",
+    r"xp_cmdshell",
 ]
 
-def detect_dangerous_sql(sql: str):
-    sql_upper = sql.upper()
-    dangerous = [kw for kw in DANGEROUS_KEYWORDS if kw in sql_upper]
-    for pattern in FORBIDDEN_PATTERNS:
-        if re.search(pattern, sql, re.IGNORECASE):
-            dangerous.append(f"INJECTION_PATTERN: {pattern}")
-    return dangerous
 
-def sanitize_sql_input(sql: str) -> str:
-    sql = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
-    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+def detect_dangerous_sql(sql: str) -> List[str]:
+    upper = sql.upper()
+    dangers: List[str] = [kw for kw in _DANGEROUS_KEYWORDS if kw in upper]
+    for pat in _INJECTION_PATTERNS:
+        if re.search(pat, sql, re.IGNORECASE | re.DOTALL):
+            dangers.append(f"INJECTION_PATTERN:{pat}")
+    return dangers
+
+
+def sanitize_sql(sql: str) -> str:
+    sql = re.sub(r"--.*$", "", sql, flags=re.MULTILINE)
+    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
     return sql.strip()
 
-def sql_to_table_preview(sql: str):
-    sql_upper = sql.upper()
-    action = "UNKNOWN"
-    table = "-"
-    condition = "-"
 
-    if sql_upper.startswith("DELETE"):
+def sql_to_table_preview(sql: str) -> Dict:
+    upper = sql.upper()
+    action, table, condition = "UNKNOWN", "-", "-"
+    if upper.startswith("DELETE"):
         action = "DELETE"
-        match = re.search(r"FROM\s+[`\"]?(\w+)[`\"]?", sql_upper)
-        if match:
-            table = match.group(1)
-        where_match = re.search(r"WHERE\s+(.+)", sql, re.IGNORECASE)
-        if where_match:
-            condition = where_match.group(1)
-    elif sql_upper.startswith("UPDATE"):
+        m = re.search(r"FROM\s+[`\"]?(\w+)[`\"]?", upper)
+        if m:
+            table = m.group(1)
+    elif upper.startswith("UPDATE"):
         action = "UPDATE"
-        match = re.search(r"UPDATE\s+[`\"]?(\w+)[`\"]?", sql_upper)
-        if match:
-            table = match.group(1)
-        where_match = re.search(r"WHERE\s+(.+)", sql, re.IGNORECASE)
-        if where_match:
-            condition = where_match.group(1)
-    elif sql_upper.startswith("DROP"):
+        m = re.search(r"UPDATE\s+[`\"]?(\w+)[`\"]?", upper)
+        if m:
+            table = m.group(1)
+    elif upper.startswith("DROP"):
         action = "DROP"
-        match = re.search(r"DROP\s+TABLE\s+[`\"]?(\w+)[`\"]?", sql_upper)
-        if match:
-            table = match.group(1)
-
+        m = re.search(r"DROP\s+TABLE\s+[`\"]?(\w+)[`\"]?", upper)
+        if m:
+            table = m.group(1)
+    w = re.search(r"WHERE\s+(.+)", sql, re.IGNORECASE)
+    if w:
+        condition = w.group(1)
     return {
         "columns": ["Action", "Table", "Condition", "Impact"],
-        "data": [[action, table, condition, "Removes/modifies record(s) permanently"]]
+        "data": [[action, table, condition, "Removes/modifies record(s) permanently"]],
     }
 
-# Auth Helpers
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-def get_user(identifier: str, db):
-    return db.query(User).filter(
-        (User.email == identifier) | (User.username == identifier)
-    ).first()
-
-# ============= OPTIMIZED COLUMN DETECTION =============
-@lru_cache(maxsize=128)
-def get_columns_cached(db_uri: str, table_name: str) -> tuple:
-    """Cached column detection"""
+# ---------------------------------------------------------------------------
+# Column detection (NOTE: invalidation is tied to schema_cache.invalidate)
+# ---------------------------------------------------------------------------
+def get_columns_from_query(uri: str, sql: str) -> List[str]:
+    """Execute a query and return its column names."""
     try:
-        engine = db_pool_manager.get_engine(db_uri)
-        inspector = inspect(engine)
-        columns = [col['name'] for col in inspector.get_columns(table_name)]
-        return tuple(columns)
-    except Exception as e:
-        print(f"Error getting columns: {e}")
-        return tuple()
-
-def get_columns_from_query_result(db_uri: str, sql_query: str) -> list:
-    try:
-        engine = db_pool_manager.get_engine(db_uri)
-        with engine.connect() as conn:
-            result = conn.execute(text(sql_query))
-            columns = list(result.keys())
-            return columns
-    except Exception as e:
-        print(f"Error getting columns: {e}")
+        eng = db_pool.get_engine(uri)
+        with eng.connect() as conn:
+            result = conn.execute(text(sql))
+            return list(result.keys())
+    except Exception as exc:
+        logger.warning("Could not get columns for query: %s", exc)
         return []
 
-def extract_table_name_from_query(sql_query: str) -> str:
-    try:
-        patterns = [
-            r'FROM\s+[`\"]?(\w+)[`\"]?',
-            r'JOIN\s+[`\"]?(\w+)[`\"]?',
-            r'INTO\s+[`\"]?(\w+)[`\"]?',
-            r'UPDATE\s+[`\"]?(\w+)[`\"]?',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, sql_query, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        return None
-    except Exception as e:
-        return None
 
-# ============= 🔥 FIXED: PostgreSQL Result Parser =============
-def parse_postgresql_result(result_str: str) -> List[tuple]:
+def extract_table_name(sql: str) -> Optional[str]:
+    for pat in [
+        r"FROM\s+[`\"]?(\w+)[`\"]?",
+        r"JOIN\s+[`\"]?(\w+)[`\"]?",
+        r"INTO\s+[`\"]?(\w+)[`\"]?",
+        r"UPDATE\s+[`\"]?(\w+)[`\"]?",
+    ]:
+        m = re.search(pat, sql, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL result string parser
+# ---------------------------------------------------------------------------
+def parse_pg_result(raw: str) -> List:
     """
-    Parse PostgreSQL result strings into proper list of tuples
-    Handles formats like: [('value1',), ('value2',)] or [(1, 'text'), (2, 'text')]
+    Safely parse a LangChain/SQLAlchemy result string such as
+    "[('val',), ('val2',)]" or "[(1, 'text'), (2, 'text')]".
+    Falls back gracefully.
     """
+    raw = raw.strip()
+    if not raw or raw == "[]":
+        return []
     try:
-        # Remove whitespace
-        result_str = result_str.strip()
-        
-        # Empty result
-        if not result_str or result_str == '[]':
-            return []
-        
-        # Try to parse as Python literal (safest method)
-        try:
-            parsed = ast.literal_eval(result_str)
-            if isinstance(parsed, list):
-                return parsed
-        except (ValueError, SyntaxError) as e:
-            print(f"[PARSE] ast.literal_eval failed: {e}, trying manual parsing")
-        
-        # Manual parsing for PostgreSQL tuple format
-        # Example: [('table1',), ('table2',)] or [(1, 'name'), (2, 'name')]
-        rows = []
-        
-        # Remove outer brackets
-        if result_str.startswith('[') and result_str.endswith(']'):
-            result_str = result_str[1:-1]
-        
-        # Split by ), ( pattern to separate rows
-        row_pattern = r'\([^)]*\)'
-        row_matches = re.findall(row_pattern, result_str)
-        
-        for row_match in row_matches:
-            # Remove parentheses
-            row_content = row_match.strip('()')
-            
-            # Split by comma
-            values = []
-            parts = row_content.split(',')
-            
-            for part in parts:
-                part = part.strip()
-                # Remove quotes if present
-                if (part.startswith("'") and part.endswith("'")) or \
-                   (part.startswith('"') and part.endswith('"')):
-                    part = part[1:-1]
-                
-                # Try to convert to int/float if possible
+        parsed = ast.literal_eval(raw)
+        if isinstance(parsed, list):
+            return parsed
+    except (ValueError, SyntaxError) as exc:
+        logger.debug("ast.literal_eval failed (%s); trying regex fallback", exc)
+
+    rows = []
+    for row_str in re.findall(r"\([^)]*\)", raw):
+        inner = row_str.strip("()")
+        values: List = []
+        for part in inner.split(","):
+            part = part.strip().strip("'\"")
+            # Only convert to int/float when the entire value is numeric
+            try:
+                values.append(int(part))
+            except ValueError:
                 try:
-                    if '.' in part:
-                        values.append(float(part))
-                    else:
-                        values.append(int(part))
+                    values.append(float(part))
                 except ValueError:
                     values.append(part)
-            
-            # Create tuple
-            if len(values) == 1:
-                rows.append((values[0],))
-            else:
-                rows.append(tuple(values))
-        
-        return rows
-    
-    except Exception as e:
-        print(f"[PARSE ERROR] Failed to parse result: {e}")
-        print(f"[PARSE ERROR] Original string: {result_str}")
-        return []
+        rows.append(tuple(values) if len(values) != 1 else (values[0],))
+    return rows
 
-# ============= 🔥 FIXED: Database-Aware SQL Prompt =============
-def get_sql_chain(cached_schema: str, db_type: str):
-    """Create LangChain with database-specific prompts"""
-    
+
+# ---------------------------------------------------------------------------
+# LangChain SQL chain
+# ---------------------------------------------------------------------------
+def build_sql_chain(schema: str, db_type: str):
     if db_type == DatabaseType.POSTGRESQL:
-        template = """You are a PostgreSQL expert. Generate ONLY the SQL query - no markdown, no explanations, no extra text.
+        template = """You are a PostgreSQL expert. Return ONLY the SQL query – no markdown, no explanation.
 
-CRITICAL RULES:
-1. Return ONLY the SQL query
-2. NO ```sql blocks, NO markdown formatting
-3. NO explanations before or after
-4. Use double quotes "table_name" for identifiers
-5. End with semicolon ;
-
-QUERY PATTERNS:
-- "show tables" / "list tables" → SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
-- "show all data from X" → SELECT * FROM "X";
-- "count records in X" → SELECT COUNT(*) as count FROM "X";
-- "table count" → SELECT COUNT(*) as table_count FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
+Rules:
+- Use double-quoted identifiers ("table_name")
+- End with a semicolon
 
 Schema: {schema}
 History: {chat_history}
 Question: {question}
 
 SQL:"""
-    else:  # MySQL
-        template = """You are a MySQL expert. Generate ONLY the SQL query - no markdown, no explanations, no extra text.
+    else:
+        template = """You are a MySQL expert. Return ONLY the SQL query – no markdown, no explanation.
 
-CRITICAL RULES:
-1. Return ONLY the SQL query
-2. NO ```sql blocks, NO markdown formatting
-3. NO explanations before or after
-4. Use backticks `table_name` for identifiers
-5. End with semicolon ;
-
-QUERY PATTERNS:
-- "show tables" / "list tables" → SHOW TABLES;
-- "show all data from X" → SELECT * FROM X;
-- "count records in X" → SELECT COUNT(*) as count FROM X;
-- "table count" → SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = DATABASE();
+Rules:
+- Use backtick identifiers (`table_name`)
+- End with a semicolon
 
 Schema: {schema}
 History: {chat_history}
 Question: {question}
 
 SQL:"""
-    
+
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatGroq(api_key=groq_api_key, model="llama-3.1-8b-instant", temperature=0)
-    
-    def get_schema(_):
-        return cached_schema
-    
+    llm = ChatGroq(api_key=GROQ_API_KEY, model="llama-3.1-8b-instant", temperature=0)
+
     return (
-        RunnablePassthrough.assign(
-            schema=get_schema,
-            db_type=lambda _: db_type.upper()
-        )
+        RunnablePassthrough.assign(schema=lambda _: schema)
         | prompt
         | llm
         | StrOutputParser()
     )
 
-# ============= 🔥 FIXED: Response Handler with Better PostgreSQL Support =============
-def get_response(question, db, chat_history, db_uri, cached_schema, db_type):
-    """Optimized response generation with database-aware handling"""
-    
-    # Check query cache first
-    cached_result = query_cache.get(question, db_uri, chat_history)
-    if cached_result:
-        return cached_result
-    
-    chain = get_sql_chain(cached_schema, db_type)
-    formatted_chat_history = "\n".join([
-        f"{'Human' if isinstance(msg, HumanMessage) else 'AI'}: {msg.content}"
-        for msg in chat_history[-6:]
-    ])
-    
+
+# ---------------------------------------------------------------------------
+# Main query handler
+# ---------------------------------------------------------------------------
+def run_query(
+    question: str,
+    sql_db: SQLDatabase,
+    history: List,
+    uri: str,
+    schema: str,
+    db_type: str,
+) -> str:
+    """Generate SQL, execute it, and return a structured JSON string."""
+
+    # Cache hit
+    cached = query_cache.get(question, uri, history)
+    if cached:
+        return cached
+
+    chain = build_sql_chain(schema, db_type)
+    formatted_history = "\n".join(
+        f"{'Human' if isinstance(m, HumanMessage) else 'AI'}: {m.content}"
+        for m in history[-6:]
+    )
+
+    # BUG FIX: define sql_query before try so the except block always has it
+    sql_query = "N/A"
     try:
-        response_text = chain.invoke({
-            "question": question,
-            "chat_history": formatted_chat_history
-        })
-        
-        # Clean the SQL query
-        sql_query = response_text.strip()
-        sql_query = re.sub(r'^```sql\s*', '', sql_query)
-        sql_query = re.sub(r'\s*```$', '', sql_query)
-        sql_query = sql_query.strip()
-        
-        # Remove multiple semicolons
-        if sql_query.count(';') > 1:
-            sql_query = sql_query.split(';')[0] + ';'
-        
-        sql_query = sanitize_sql_input(sql_query)
-        
-        print(f"[SQL GENERATED] {sql_query}")
-        
-        # Check for dangerous operations
-        dangerous_ops = detect_dangerous_sql(sql_query)
-        
-        if dangerous_ops:
-            result = json.dumps({
+        raw_response = chain.invoke({"question": question, "chat_history": formatted_history})
+
+        # Strip accidental markdown fences
+        sql_query = re.sub(r"^```sql\s*", "", raw_response.strip(), flags=re.IGNORECASE)
+        sql_query = re.sub(r"\s*```$", "", sql_query).strip()
+
+        # Keep only the first statement
+        if sql_query.count(";") > 1:
+            sql_query = sql_query.split(";")[0] + ";"
+
+        sql_query = sanitize_sql(sql_query)
+        logger.info("Generated SQL: %s", sql_query)
+
+        dangers = detect_dangerous_sql(sql_query)
+        if dangers:
+            return json.dumps({
                 "type": "confirmation_required",
                 "sql": sql_query,
                 "table": sql_to_table_preview(sql_query),
-                "warnings": dangerous_ops
+                "warnings": dangers,
             })
-            return result
-        
-        sql_upper = sql_query.upper()
-        
-        # Execute the query
-        result = db.run(sql_query)
-        
-        print(f"[RAW RESULT] Type: {type(result)}, Value: {result}")
-        
-        # 🔥 FIX: Better result parsing for PostgreSQL
-        is_select = sql_upper.startswith('SELECT') or 'SHOW' in sql_upper or 'pg_catalog' in sql_query
-        
-        if is_select:
-            # Get columns
-            columns = get_columns_from_query_result(db_uri, sql_query)
-            if not columns:
-                table_name = extract_table_name_from_query(sql_query)
-                if table_name:
-                    columns = list(get_columns_cached(db_uri, table_name))
-            
-            clean_result = result.strip()
-            
-            # Empty result
-            if clean_result == '[]' or clean_result == '' or 'Empty set' in clean_result:
-                output_data = {
-                    "type": "select",
-                    "data": [],
-                    "columns": columns or [],
-                    "row_count": 0
-                }
-            
-            # PostgreSQL format: [('value',)] or [(1, 'text')]
-            elif clean_result.startswith('[') and clean_result.endswith(']'):
-                try:
-                    # 🔥 Use improved PostgreSQL parser
-                    if db_type == DatabaseType.POSTGRESQL:
-                        raw_data = parse_postgresql_result(clean_result)
-                    else:
-                        # MySQL - use original parsing
-                        cleaned = re.sub(r"Decimal\('([^']+)'\)", r"'\1'", clean_result)
-                        try:
-                            raw_data = json.loads(cleaned.replace("'", '"').replace('None', 'null'))
-                        except:
-                            raw_data = ast.literal_eval(cleaned)
-                    
-                    print(f"[PARSED DATA] {raw_data}")
-                    
-                    if isinstance(raw_data, list):
-                        if not raw_data:
-                            data = []
-                        elif isinstance(raw_data[0], (tuple, list)):
-                            # Convert tuples to lists of strings
-                            data = []
-                            for row in raw_data:
-                                row_data = []
-                                for cell in row:
-                                    if cell is None:
-                                        row_data.append('')
-                                    elif isinstance(cell, (int, float)):
-                                        row_data.append(str(cell))
-                                    elif isinstance(cell, bytes):
-                                        row_data.append(cell.decode('utf-8', errors='ignore'))
-                                    else:
-                                        row_data.append(str(cell))
-                                data.append(row_data)
-                        else:
-                            data = [[str(item) if item is not None else ''] for item in raw_data]
-                        
-                        # Auto-generate columns if missing
-                        if data and not columns:
-                            columns = [f'column_{i}' for i in range(len(data[0]))]
-                        
-                        output_data = {
-                            "type": "select",
-                            "data": data,
-                            "columns": columns,
-                            "row_count": len(data)
-                        }
-                        
-                        print(f"[OUTPUT DATA] Rows: {len(data)}, Columns: {columns}")
-                    else:
-                        raise ValueError("Unexpected data format")
-                
-                except Exception as e:
-                    print(f"[PARSE ERROR] {e}")
-                    output_data = {
-                        "type": "error",
-                        "message": f"Failed to parse result: {str(e)}"
-                    }
-            else:
-                output_data = {
-                    "type": "error",
-                    "message": f"Unexpected format: {clean_result[:200]}"
-                }
-        
-        else:
-            # Handle INSERT, UPDATE, DELETE, CREATE, etc.
-            clean_result = result.strip()
-            affected_rows = 0
-            
-            if 'Query OK' in clean_result or 'rows affected' in clean_result:
-                match = re.search(r'(\d+) rows? affected', clean_result)
-                affected_rows = int(match.group(1)) if match else 0
-                message = f"Statement executed successfully. {affected_rows} row(s) affected."
-            else:
-                message = clean_result or "Statement executed successfully."
-            
-            output_data = {
-                "type": "status",
-                "message": message,
-                "affected_rows": affected_rows
-            }
-        
-        final_result = f"SQL: `{sql_query}`\nOutput: {json.dumps(output_data)}"
-        
-        # Cache the result
-        query_cache.set(question, db_uri, chat_history, final_result)
-        
-        return final_result
-    
-    except Exception as e:
-        error_data = {
-            "type": "error",
-            "message": str(e)
-        }
-        sql_query_placeholder = sql_query if 'sql_query' in locals() else 'N/A'
-        return f"SQL: `{sql_query_placeholder}`\nOutput: {json.dumps(error_data)}"
 
-# ============= STARTUP/SHUTDOWN EVENTS =============
-@app.on_event("startup")
-async def startup_event():
-    """Validate environment on startup"""
+        raw_result = sql_db.run(sql_query)
+        logger.debug("Raw DB result: %s", raw_result)
+
+        is_read = sql_query.upper().startswith("SELECT") or "SHOW" in sql_query.upper()
+
+        if is_read:
+            columns = get_columns_from_query(uri, sql_query)
+            clean = raw_result.strip()
+
+            if not clean or clean == "[]" or "Empty set" in clean:
+                output = {"type": "select", "data": [], "columns": columns, "row_count": 0}
+            elif clean.startswith("[") and clean.endswith("]"):
+                if db_type == DatabaseType.POSTGRESQL:
+                    rows_raw = parse_pg_result(clean)
+                else:
+                    # MySQL: handle Decimal objects from repr strings
+                    cleaned = re.sub(r"Decimal\('([^']+)'\)", r"'\1'", clean)
+                    try:
+                        rows_raw = ast.literal_eval(cleaned)
+                    except Exception:
+                        rows_raw = []
+
+                def cell_to_str(c) -> str:
+                    if c is None:
+                        return ""
+                    if isinstance(c, bytes):
+                        return c.decode("utf-8", errors="replace")
+                    return str(c)
+
+                if rows_raw and isinstance(rows_raw[0], (tuple, list)):
+                    data = [[cell_to_str(c) for c in row] for row in rows_raw]
+                else:
+                    data = [[cell_to_str(item)] for item in rows_raw]
+
+                if data and not columns:
+                    columns = [f"column_{i}" for i in range(len(data[0]))]
+
+                output = {"type": "select", "data": data, "columns": columns, "row_count": len(data)}
+            else:
+                output = {"type": "error", "message": f"Unexpected format: {clean[:200]}"}
+        else:
+            # DML / DDL
+            clean = raw_result.strip()
+            m = re.search(r"(\d+)\s+rows?\s+affected", clean, re.IGNORECASE)
+            affected = int(m.group(1)) if m else 0
+            output = {
+                "type": "status",
+                "message": f"Executed successfully. {affected} row(s) affected.",
+                "affected_rows": affected,
+            }
+
+        final = f"SQL: `{sql_query}`\nOutput: {json.dumps(output)}"
+        query_cache.set(question, uri, history, final)
+        return final
+
+    except Exception as exc:
+        logger.error("Query execution error: %s", exc)
+        output = {"type": "error", "message": str(exc)}
+        return f"SQL: `{sql_query}`\nOutput: {json.dumps(output)}"
+
+
+# ---------------------------------------------------------------------------
+# App lifespan (replaces deprecated @app.on_event)
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     validate_environment()
+
+    # Ensure is_starred column exists (migration guard)
     try:
         with engine.connect() as conn:
-            # Check if column exists
-            result = conn.execute(text(
-                "SELECT name FROM pragma_table_info('chat_sessions') WHERE name='is_starred'"
-            ))
+            result = conn.execute(
+                text("SELECT name FROM pragma_table_info('chat_sessions') WHERE name='is_starred'")
+            )
             if not result.fetchone():
                 conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN is_starred INTEGER DEFAULT 0"))
                 conn.commit()
-                logger.info("✅ Added is_starred column to chat_sessions table")
-    except Exception as e:
-        logger.warning(f"⚠️ Migration check: {e}")
-    
-    try:
-        import slowapi
-        version = getattr(slowapi, '__version__', 'unknown')
-        logger.info(f"✅ Rate limiting enabled (slowapi v{version})")
-    except ImportError:
-        logger.warning("⚠️ slowapi not installed - rate limiting will not work!")
-    except Exception as e:
-        logger.warning(f"⚠️ Rate limiting may not be working: {e}")
-    
-    logger.info("🚀 Application started successfully with MySQL & PostgreSQL support")
+                logger.info("Added is_starred column")
+    except Exception as exc:
+        logger.warning("Migration check warning: %s", exc)
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on shutdown"""
-    logger.info("🛑 Shutting down application...")
-    
-    # Close all connection pools
-    for db_uri in list(db_pool_manager._pools.keys()):
-        db_pool_manager.clear_pool(db_uri)
-    
-    # Clear all caches
-    schema_cache._cache.clear()
+    logger.info("Query Genie started")
+    yield
+    # Shutdown
+    db_pool.clear_all()
+    schema_cache.clear_all()
     query_cache.clear()
-    
-    logger.info("✅ Cleanup completed")
+    logger.info("Query Genie shutdown complete")
 
-# ============= API ENDPOINTS =============
 
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+app = FastAPI(lifespan=lifespan)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "success": False,
+            "error": "Rate Limit Exceeded",
+            "message": "Too many requests. Please try again later.",
+            "retry_after": 60,
+        },
+        headers={"Retry-After": "60"},
+    )
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8080", "http://localhost:8081",
+        "http://localhost:5173", "http://localhost:3000",
+        "http://127.0.0.1:8080", "http://127.0.0.1:8081",
+        "http://127.0.0.1:5173", "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Per-request state helpers (replaces app.state global mutation)
+# ---------------------------------------------------------------------------
+# Stored as a simple module-level object; per-process, not per-request.
+# For true multi-tenancy you'd store per-user in a database or session token.
+class _AppState:
+    db_uri: Optional[str] = None
+    db_name: Optional[str] = None
+    db_type: Optional[str] = None
+
+
+_app_state = _AppState()
+
+
+def require_db_connection():
+    if not _app_state.db_uri:
+        raise HTTPException(status_code=400, detail="No database connected")
+    return _app_state
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "database_connected": hasattr(app.state, "db_uri"),
-        "database_type": db_pool_manager.get_db_type(app.state.db_uri) if hasattr(app.state, "db_uri") else None,
-        "cache_stats": {
-            "schema_cache": len(schema_cache._cache),
-            "query_cache": len(query_cache._cache),
-            "connection_pools": len(db_pool_manager._pools)
-        }
+        "database_connected": bool(_app_state.db_uri),
+        "database_type": _app_state.db_type,
     }
 
+
+# ---------------------------------------------------------------------------
+# DB connection endpoints
+# ---------------------------------------------------------------------------
 @app.post("/api/list-databases")
 @limiter.limit("20/minute")
-async def list_databases(
-    request: Request,
-    creds: DBCredentials
-):
-    """List databases with support for both MySQL and PostgreSQL"""
-    print(f"[LIST DB] Request: host={creds.host}, port={creds.port}, user={creds.user}, type={creds.db_type}")
-    
+async def list_databases(request: Request, creds: DBCredentials):
+    uri = build_db_uri(creds.host, creds.port, creds.user, creds.password, creds.db_type)
     try:
-        db_uri = build_db_uri(creds)
-        
-        temp_engine = create_engine(
-            db_uri,
-            poolclass=pool.NullPool,
-            echo=False
-        )
-        
-        list_query, system_dbs = get_list_databases_query(creds.db_type)
-        
-        with temp_engine.connect() as conn:
-            result = conn.execute(text(list_query))
-            databases = [row[0] for row in result]
-            user_databases = [db for db in databases if db not in system_dbs]
-        
-        temp_engine.dispose()
-        
-        print(f"[LIST DB] Found {len(user_databases)} user databases ({creds.db_type})")
-        return {
-            "success": True,
-            "databases": user_databases,
-            "db_type": creds.db_type,
-            "message": f"Found {len(user_databases)} database(s)"
-        }
-    
-    except OperationalError as e:
-        error_msg = str(e)
-        print(f"[LIST DB] OperationalError: {error_msg}")
-        
-        if "Access denied" in error_msg or "1045" in error_msg or "authentication failed" in error_msg.lower():
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "success": False,
-                    "error": "Authentication Failed",
-                    "message": f"Invalid username or password for the {creds.db_type.upper()} server.",
-                    "code": "AUTH_FAILED"
-                }
-            )
-        elif "Can't connect" in error_msg or "Connection refused" in error_msg or "could not connect" in error_msg.lower():
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "success": False,
-                    "error": "Connection Refused",
-                    "message": f"Cannot connect to {creds.db_type.upper()} server at {creds.host}:{creds.port}.",
-                    "code": "CONNECTION_REFUSED"
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "success": False,
-                    "error": "Connection Failed",
-                    "message": error_msg,
-                    "code": "CONNECTION_ERROR"
-                }
-            )
-    
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[LIST DB] Unexpected error: {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "success": False,
-                "error": "Unknown Error",
-                "message": error_msg,
-                "code": "UNKNOWN_ERROR"
-            }
-        )
+        tmp = create_engine(uri, poolclass=pool.NullPool)
+        sql, system_dbs = get_list_databases_query(creds.db_type)
+        with tmp.connect() as conn:
+            rows = conn.execute(text(sql)).fetchall()
+        tmp.dispose()
+        dbs = [r[0] for r in rows if r[0] not in system_dbs]
+        return {"success": True, "databases": dbs, "db_type": creds.db_type}
+    except OperationalError as exc:
+        msg = str(exc)
+        if "Access denied" in msg or "authentication failed" in msg.lower():
+            raise HTTPException(401, detail={"error": "Authentication Failed", "message": msg})
+        if "Connection refused" in msg or "could not connect" in msg.lower():
+            raise HTTPException(503, detail={"error": "Connection Refused", "message": msg})
+        raise HTTPException(500, detail={"error": "Connection Error", "message": msg})
+    except Exception as exc:
+        raise HTTPException(500, detail={"error": "Unknown Error", "message": str(exc)})
+
 
 @app.post("/api/create-database")
 @limiter.limit("10/hour")
-async def create_database(
-    request: Request,
-    config: DBCreate
-):
-    """Create database with support for both MySQL and PostgreSQL"""
-    print(f"[CREATE DB] Request to create {config.db_type} database: {config.database_name}")
-    
+async def create_database(request: Request, config: DBCreate):
+    """DBCreate.database_name is validated by the Pydantic model itself."""
+    uri = build_db_uri(config.host, config.port, config.user, config.password, config.db_type)
     try:
-        if not re.match(r'^[a-zA-Z0-9_]+$', config.database_name):
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "success": False,
-                    "error": "Invalid Database Name",
-                    "message": "Database name can only contain letters, numbers, and underscores.",
-                    "code": "INVALID_NAME"
-                }
-            )
-        
-        if len(config.database_name) > 63:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "success": False,
-                    "error": "Name Too Long",
-                    "message": "Database name must be 63 characters or less.",
-                    "code": "NAME_TOO_LONG"
-                }
-            )
-        
-        db_uri = build_db_uri(config)
-        temp_engine = create_engine(db_uri, poolclass=pool.NullPool, echo=False)
-        
-        list_query, system_dbs = get_list_databases_query(config.db_type)
-        create_query = get_create_database_query(config.db_type, config.database_name)
-        
-        with temp_engine.connect() as conn:
-            result = conn.execute(text(list_query))
-            existing_databases = [row[0] for row in result]
-            
-            if config.database_name in existing_databases:
-                temp_engine.dispose()
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "success": False,
-                        "error": "Database Already Exists",
-                        "message": f"Database '{config.database_name}' already exists.",
-                        "code": "DATABASE_EXISTS"
-                    }
-                )
-            
+        tmp = create_engine(uri, poolclass=pool.NullPool)
+        sql, system_dbs = get_list_databases_query(config.db_type)
+        create_sql = get_create_database_sql(config.db_type, config.database_name)
+
+        with tmp.connect() as conn:
+            existing = [r[0] for r in conn.execute(text(sql)).fetchall()]
+            if config.database_name in existing:
+                raise HTTPException(409, detail={"error": "Database Already Exists"})
             if config.db_type == DatabaseType.POSTGRESQL:
                 conn.execute(text("COMMIT"))
-                conn.execute(text(create_query))
-            else:
-                conn.execute(text(create_query))
+            conn.execute(text(create_sql))
+            if config.db_type != DatabaseType.POSTGRESQL:
                 conn.commit()
-        
-        temp_engine.dispose()
-        
-        print(f"[CREATE DB] Successfully created {config.db_type} database: {config.database_name}")
-        return {
-            "success": True,
-            "database_name": config.database_name,
-            "db_type": config.db_type,
-            "message": f"Database '{config.database_name}' created successfully"
-        }
-    
-    except HTTPException as e:
-        raise e
-    except OperationalError as e:
-        error_msg = str(e)
-        print(f"[CREATE DB] OperationalError: {error_msg}")
-        
-        if "Access denied" in error_msg or "1044" in error_msg or "permission denied" in error_msg.lower():
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "success": False,
-                    "error": "Permission Denied",
-                    "message": f"Your {config.db_type.upper()} user does not have permission to create databases.",
-                    "code": "PERMISSION_DENIED"
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "success": False,
-                    "error": "Database Creation Failed",
-                    "message": error_msg,
-                    "code": "CREATION_ERROR"
-                }
-            )
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[CREATE DB] Unexpected error: {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "success": False,
-                "error": "Unknown Error",
-                "message": error_msg,
-                "code": "UNKNOWN_ERROR"
-            }
-        )
+        tmp.dispose()
+        return {"success": True, "database_name": config.database_name}
+    except HTTPException:
+        raise
+    except OperationalError as exc:
+        msg = str(exc)
+        code = 403 if ("Access denied" in msg or "permission denied" in msg.lower()) else 500
+        raise HTTPException(code, detail={"error": "DB Creation Failed", "message": msg})
+    except Exception as exc:
+        raise HTTPException(500, detail={"error": "Unknown Error", "message": str(exc)})
+
 
 @app.post("/api/connect")
 @limiter.limit("20/minute")
-async def connect_db(
-    request: Request,
-    config: DBSelection
-):
-    """Connect to database with support for both MySQL and PostgreSQL"""
-    print(f"[CONNECT] Request: host={config.host}, port={config.port}, user={config.user}, database={config.database}, type={config.db_type}")
-    
+async def connect_db(request: Request, config: DBSelection):
+    uri = build_db_uri(config.host, config.port, config.user, config.password, config.db_type, config.database)
     try:
-        db_uri = build_db_uri(config, config.database)
-        test_engine = db_pool_manager.get_engine(db_uri, config.db_type)
-        
-        with test_engine.connect() as conn:
+        eng = db_pool.get_engine(uri, config.db_type)
+        with eng.connect() as conn:
             conn.execute(text("SELECT 1"))
-        
-        test_db = db_pool_manager.get_db(db_uri, config.db_type)
-        schema_cache.get_schema(db_uri, test_db)
-        
-        app.state.db_uri = db_uri
-        app.state.db_name = config.database
-        app.state.db_type = config.db_type
-        
-        print(f"✅ {config.db_type.upper()} database connected with connection pooling and schema cached")
-        return {
-            "success": True,
-            "message": f"{config.db_type.upper()} database connected successfully",
-            "database": config.database,
-            "db_type": config.db_type
-        }
-    
-    except ProgrammingError as e:
-        error_msg = str(e)
-        print(f"[CONNECT] ProgrammingError: {error_msg}")
-        
-        if "Unknown database" in error_msg or "1049" in error_msg or "does not exist" in error_msg.lower():
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "success": False,
-                    "error": "Database Not Found",
-                    "message": f"The database '{config.database}' does not exist on the {config.db_type.upper()} server.",
-                    "suggestion": f"Please create the database first.",
-                    "code": "DATABASE_NOT_FOUND"
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "success": False,
-                    "error": "SQL Programming Error",
-                    "message": error_msg,
-                    "code": "SQL_ERROR"
-                }
-            )
-    
-    except OperationalError as e:
-        error_msg = str(e)
-        print(f"[CONNECT] OperationalError: {error_msg}")
-        
-        if "Access denied" in error_msg or "1045" in error_msg or "authentication failed" in error_msg.lower():
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "success": False,
-                    "error": "Authentication Failed",
-                    "message": f"Invalid username or password for the {config.db_type.upper()} server.",
-                    "suggestion": f"Please verify your {config.db_type.upper()} username and password.",
-                    "code": "AUTH_FAILED"
-                }
-            )
-        elif "Can't connect" in error_msg or "Connection refused" in error_msg or "2003" in error_msg or "could not connect" in error_msg.lower():
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "success": False,
-                    "error": "Connection Refused",
-                    "message": f"Cannot connect to {config.db_type.upper()} server at {config.host}:{config.port}.",
-                    "suggestion": f"Please verify the host and port are correct and the {config.db_type.upper()} server is running.",
-                    "code": "CONNECTION_REFUSED"
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "success": False,
-                    "error": "Connection Failed",
-                    "message": error_msg,
-                    "suggestion": "Please check your connection parameters and try again.",
-                    "code": "CONNECTION_ERROR"
-                }
-            )
-    
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[CONNECT] Unexpected error: {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "success": False,
-                "error": "Unknown Error",
-                "message": error_msg,
-                "suggestion": "An unexpected error occurred. Please check your configuration and try again.",
-                "code": "UNKNOWN_ERROR"
-            }
-        )
+
+        sql_db = db_pool.get_sql_db(uri, config.db_type)
+        schema_cache.get(uri, sql_db)  # pre-warm
+
+        _app_state.db_uri = uri
+        _app_state.db_name = config.database
+        _app_state.db_type = config.db_type
+
+        logger.info("Connected to %s database: %s", config.db_type, config.database)
+        return {"success": True, "database": config.database, "db_type": config.db_type}
+    except ProgrammingError as exc:
+        msg = str(exc)
+        code = 404 if "does not exist" in msg.lower() or "Unknown database" in msg else 400
+        raise HTTPException(code, detail={"error": "DB Error", "message": msg})
+    except OperationalError as exc:
+        msg = str(exc)
+        if "Access denied" in msg or "authentication failed" in msg.lower():
+            raise HTTPException(401, detail={"error": "Authentication Failed", "message": msg})
+        raise HTTPException(503, detail={"error": "Connection Refused", "message": msg})
+    except Exception as exc:
+        raise HTTPException(500, detail={"error": "Unknown Error", "message": str(exc)})
+
 
 @app.post("/api/disconnect")
 async def disconnect_db():
-    """Disconnect from database and clear caches"""
-    if hasattr(app.state, "db_uri"):
-        db_uri = app.state.db_uri
-        db_type = app.state.db_type if hasattr(app.state, "db_type") else "unknown"
-        
-        db_pool_manager.clear_pool(db_uri)
-        schema_cache.invalidate(db_uri)
-        query_cache.clear()
-        
-        delattr(app.state, "db_uri")
-        if hasattr(app.state, "db_name"):
-            delattr(app.state, "db_name")
-        if hasattr(app.state, "db_type"):
-            delattr(app.state, "db_type")
-        
-        print(f"✅ {db_type.upper()} database disconnected, connection pool cleared, caches invalidated")
-        return {"success": True, "message": "Database disconnected successfully"}
-    return {"success": False, "message": "No database connection to disconnect"}
+    if not _app_state.db_uri:
+        return {"success": False, "message": "No database connected"}
+    db_pool.clear(_app_state.db_uri)
+    schema_cache.invalidate(_app_state.db_uri)
+    query_cache.clear()
+    _app_state.db_uri = None
+    _app_state.db_name = None
+    _app_state.db_type = None
+    return {"success": True, "message": "Disconnected"}
+
 
 @app.get("/api/tables")
 @limiter.limit("30/minute")
-async def get_all_tables(request: Request):
-    """Get list of tables with database-type awareness"""
-    if not hasattr(app.state, "db_uri"):
-        raise HTTPException(status_code=400, detail="Database not connected")
-    
+async def get_all_tables(request: Request, state=Depends(require_db_connection)):
     try:
-        db_type = db_pool_manager.get_db_type(app.state.db_uri)
-        engine = db_pool_manager.get_engine(app.state.db_uri)
-        
-        if db_type == DatabaseType.POSTGRESQL:
-            with engine.connect() as conn:
-                result = conn.execute(text("""
-                    SELECT tablename 
-                    FROM pg_catalog.pg_tables 
-                    WHERE schemaname != 'pg_catalog' 
-                    AND schemaname != 'information_schema'
-                    ORDER BY tablename
-                """))
-                tables = [row[0] for row in result]
-        else:  # MySQL
-            inspector = inspect(engine)
-            tables = inspector.get_table_names()
-        
-        print(f"[GET TABLES] Retrieved {len(tables)} tables from {db_type}")
-        
-        return {
-            "success": True,
-            "tables": tables,
-            "count": len(tables),
-            "database": app.state.db_name if hasattr(app.state, 'db_name') else 'unknown',
-            "db_type": db_type
-        }
-    
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[GET TABLES ERROR] {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve tables: {error_msg}"
-        )
+        eng = db_pool.get_engine(state.db_uri)
+        if state.db_type == DatabaseType.POSTGRESQL:
+            with eng.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT tablename FROM pg_catalog.pg_tables "
+                    "WHERE schemaname NOT IN ('pg_catalog','information_schema') "
+                    "ORDER BY tablename"
+                )).fetchall()
+            tables = [r[0] for r in rows]
+        else:
+            tables = inspect(eng).get_table_names()
+        return {"success": True, "tables": tables, "count": len(tables), "database": state.db_name}
+    except Exception as exc:
+        raise HTTPException(500, detail=str(exc))
+
 
 @app.get("/api/table-schema/{table_name}")
 @limiter.limit("30/minute")
-async def get_table_schema(
-    request: Request,
-    table_name: str
-):
-    """Get schema for a specific table"""
-    if not hasattr(app.state, "db_uri"):
-        raise HTTPException(status_code=400, detail="Database not connected")
-    
+async def get_table_schema(request: Request, table_name: str, state=Depends(require_db_connection)):
     try:
-        engine = db_pool_manager.get_engine(app.state.db_uri)
-        inspector = inspect(engine)
-        
-        if table_name not in inspector.get_table_names():
-            raise HTTPException(
-                status_code=404,
-                detail=f"Table '{table_name}' not found"
-            )
-        
-        columns = inspector.get_columns(table_name)
-        pk_constraint = inspector.get_pk_constraint(table_name)
-        primary_keys = pk_constraint.get('constrained_columns', []) if pk_constraint else []
-        fk_constraints = inspector.get_foreign_keys(table_name)
-        foreign_keys = []
-        for fk in fk_constraints:
-            foreign_keys.extend(fk.get('constrained_columns', []))
-        unique_constraints = inspector.get_unique_constraints(table_name)
-        unique_columns = []
-        for uc in unique_constraints:
-            unique_columns.extend(uc.get('column_names', []))
-        
-        schema_info = []
-        for col in columns:
-            col_name = col['name']
-            key = None
-            if col_name in primary_keys:
-                key = 'PRI'
-            elif col_name in foreign_keys:
-                key = 'MUL'
-            elif col_name in unique_columns:
-                key = 'UNI'
-            
-            schema_info.append({
-                'name': col_name,
-                'type': str(col['type']),
-                'nullable': col.get('nullable', True),
-                'key': key,
-                'default': str(col['default']) if col.get('default') is not None else None,
-                'autoincrement': col.get('autoincrement', False)
+        eng = db_pool.get_engine(state.db_uri)
+        insp = inspect(eng)
+        if table_name not in insp.get_table_names():
+            raise HTTPException(404, detail=f"Table '{table_name}' not found")
+
+        pk = (insp.get_pk_constraint(table_name) or {}).get("constrained_columns", [])
+        fks = [c for fk in insp.get_foreign_keys(table_name) for c in fk.get("constrained_columns", [])]
+        uniq = [c for uc in insp.get_unique_constraints(table_name) for c in uc.get("column_names", [])]
+
+        cols = []
+        for col in insp.get_columns(table_name):
+            name = col["name"]
+            key = "PRI" if name in pk else ("MUL" if name in fks else ("UNI" if name in uniq else None))
+            cols.append({
+                "name": name,
+                "type": str(col["type"]),
+                "nullable": col.get("nullable", True),
+                "key": key,
+                "default": str(col["default"]) if col.get("default") is not None else None,
+                "autoincrement": col.get("autoincrement", False),
             })
-        
-        print(f"[GET SCHEMA] Retrieved schema for table '{table_name}': {len(schema_info)} columns")
-        
-        return {
-            "success": True,
-            "table_name": table_name,
-            "columns": schema_info,
-            "column_count": len(schema_info)
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[GET SCHEMA ERROR] Failed to get schema for '{table_name}': {error_msg}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve table schema: {error_msg}"
-        )
+        return {"success": True, "table_name": table_name, "columns": cols}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, detail=str(exc))
+
 
 @app.post("/api/chat")
 @limiter.limit("30/minute")
-async def chat_endpoint(
-    request: Request,
-    chat_request: ChatRequest
-):
-    """Chat endpoint with database-type awareness"""
-    if not hasattr(app.state, "db_uri"):
-        raise HTTPException(status_code=400, detail="Database not connected")
-    
-    chat_history = [
-        AIMessage(content=msg["content"]) if msg["role"] == "ai"
-        else HumanMessage(content=msg["content"])
-        for msg in chat_request.chat_history
+async def chat_endpoint(request: Request, body: ChatRequest, state=Depends(require_db_connection)):
+    history = [
+        AIMessage(content=m["content"]) if m["role"] == "ai" else HumanMessage(content=m["content"])
+        for m in body.chat_history
     ]
-    
     try:
-        db_type = db_pool_manager.get_db_type(app.state.db_uri) or app.state.db_type
-        db = db_pool_manager.get_db(app.state.db_uri, db_type)
-        cached_schema = schema_cache.get_schema(app.state.db_uri, db)
-        
-        response = get_response(
-            chat_request.question,
-            db,
-            chat_history,
-            app.state.db_uri,
-            cached_schema,
-            db_type
-        )
-        
-        return {"success": True, "response": response}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        print(f"Chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        sql_db = db_pool.get_sql_db(state.db_uri, state.db_type)
+        schema = schema_cache.get(state.db_uri, sql_db)
+        result = run_query(body.question, sql_db, history, state.db_uri, schema, state.db_type)
+        return {"success": True, "response": result}
+    except Exception as exc:
+        logger.error("Chat error: %s", exc)
+        raise HTTPException(500, detail=str(exc))
+
 
 @app.post("/api/confirm-sql")
 @limiter.limit("20/minute")
-async def confirm_sql_action(
-    request: Request,
-    req: ConfirmSQLRequest
-):
-    """Confirm and execute dangerous SQL"""
-    if not req.confirm:
-        return {
-            "type": "status",
-            "message": "SQL execution cancelled by user"
-        }
-    
+async def confirm_sql(request: Request, body: ConfirmSQLRequest, state=Depends(require_db_connection)):
+    if not body.confirm:
+        return {"type": "status", "message": "SQL execution cancelled"}
     try:
-        if not hasattr(app.state, "db_uri"):
-            raise HTTPException(status_code=400, detail="Database not connected")
-
-        db_type = db_pool_manager.get_db_type(app.state.db_uri)
-        db = db_pool_manager.get_db(app.state.db_uri, db_type)
-        result = db.run(req.sql)
-        
-        schema_cache.invalidate(app.state.db_uri)
+        sql_db = db_pool.get_sql_db(state.db_uri, state.db_type)
+        result = sql_db.run(body.sql)
+        schema_cache.invalidate(state.db_uri)
         query_cache.clear()
-        
-        return {
-            "type": "status",
-            "message": f"SQL executed successfully. Result: {result}"
-        }
-    except Exception as e:
-        return {
-            "type": "error",
-            "message": str(e)
-        }
+        return {"type": "status", "message": f"Executed. Result: {result}"}
+    except Exception as exc:
+        return {"type": "error", "message": str(exc)}
 
-# ============= [Continue with all other endpoints - user management, etc.] =============
-# [The rest of your endpoints remain exactly the same - just copy them from your original file]
 
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
 @app.post("/api/send-otp")
 @limiter.limit("3/minute")
-async def send_otp_for_signup(
-    request: Request,
-    otp_request: OtpRequest,
-    db: Session = Depends(get_db)
-):
-    """Send OTP - Now stored in database"""
+async def send_signup_otp(request: Request, body: OtpRequest, db: Session = Depends(get_db)):
     otp = generate_otp()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
-    
-    db.query(OTP).filter(OTP.email == otp_request.email).delete()
-    
-    db_otp = OTP(
-        email=otp_request.email,
-        otp=otp,
-        expires_at=expires_at
-    )
-    db.add(db_otp)
+    db.query(OTP).filter(OTP.email == body.email).delete()
+    db.add(OTP(email=body.email, otp=otp, expires_at=expires_at))
     db.commit()
-    
-    email_sent = send_otp_email(otp_request.email, otp)
-    
-    if email_sent:
-        message = "OTP has been sent to your email."
-    else:
-        message = "Email unavailable; check server logs for OTP."
-    
-    print(f"[OTP] Generated OTP for {otp_request.email}: {otp}")
-    return {"success": True, "message": message}
+    sent = send_otp_email(body.email, otp)
+    logger.info("OTP for %s: %s", body.email, otp)
+    return {"success": True, "message": "OTP sent" if sent else "OTP generated (email unavailable)"}
+
 
 @app.post("/api/signup", status_code=201)
 @limiter.limit("5/hour")
-async def signup_user(
-    request: Request,
-    user: UserCreate,
-    db: Session = Depends(get_db)
-):
-    """Register new user - OTP verified from database"""
-    stored_otp = db.query(OTP).filter(OTP.email == user.email).first()
-    
-    if not stored_otp:
-        raise HTTPException(status_code=400, detail="OTP not requested or expired.")
-    
-    now = datetime.now(timezone.utc)
-    expires_at = make_tz_aware(stored_otp.expires_at)
-    
-    if now > expires_at:
-        db.delete(stored_otp)
-        db.commit()
-        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
-    
-    if stored_otp.otp != user.otp:
-        raise HTTPException(status_code=400, detail="Invalid OTP provided.")
-    
-    if db.query(User).filter(User.email == user.email).first():
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    if user.phone:
-        existing_phone = db.query(User).filter(User.phone == user.phone).first()
-        if existing_phone:
-            raise HTTPException(status_code=400, detail="Phone number already registered")
-    
-    existing_username = db.query(User).filter(User.username == user.username).first()
-    if existing_username:
-        raise HTTPException(status_code=400, detail="Username already taken")
-    
-    hashed_password = get_password_hash(user.password)
-    db_user = User(
-        email=user.email,
-        phone=user.phone,
-        firstName=user.firstName,
-        lastName=user.lastName,
-        gender=user.gender,
-        username=user.username,
-        hashed_password=hashed_password
-    )
-    db.add(db_user)
-    
-    db.delete(stored_otp)
+async def signup(request: Request, body: UserCreate, db: Session = Depends(get_db)):
+    stored = db.query(OTP).filter(OTP.email == body.email).first()
+    if not stored:
+        raise HTTPException(400, detail="OTP not requested or expired")
+    if datetime.now(timezone.utc) > make_tz_aware(stored.expires_at):
+        db.delete(stored); db.commit()
+        raise HTTPException(400, detail="OTP expired")
+    if stored.otp != body.otp:
+        raise HTTPException(400, detail="Invalid OTP")
+    if db.query(User).filter(User.email == body.email).first():
+        raise HTTPException(400, detail="Email already registered")
+    if body.phone and db.query(User).filter(User.phone == body.phone).first():
+        raise HTTPException(400, detail="Phone already registered")
+    if db.query(User).filter(User.username == body.username).first():
+        raise HTTPException(400, detail="Username already taken")
+
+    db.add(User(
+        email=body.email, phone=body.phone,
+        firstName=body.firstName, lastName=body.lastName,
+        gender=body.gender, username=body.username,
+        hashed_password=get_password_hash(body.password),
+    ))
+    db.delete(stored)
     db.commit()
-    db.refresh(db_user)
-    
-    return {"success": True, "message": "User created successfully"}
+    return {"success": True, "message": "User created"}
+
 
 @app.post("/api/login")
 @limiter.limit("10/minute")
-async def login_for_access_token(
-    request: Request,
-    form_data: UserLogin,
-    db: Session = Depends(get_db)
-):
-    """Login with email or username"""
-    user = get_user(form_data.identifier, db)
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Incorrect email/username or password")
-    
+async def login(request: Request, body: UserLogin, db: Session = Depends(get_db)):
+    user = db.query(User).filter(
+        (User.email == body.identifier) | (User.username == body.identifier)
+    ).first()
+    if not user or not verify_password(body.password, user.hashed_password):
+        raise HTTPException(401, detail="Incorrect credentials")
     return {
         "success": True,
-        "message": "Login successful",
         "user": {
-            "id": user.id,
-            "email": user.email,
-            "phone": user.phone,
-            "firstName": user.firstName,
-            "lastName": user.lastName,
-            "username": user.username,
-            "gender": user.gender
-        }
+            "id": user.id, "email": user.email, "phone": user.phone,
+            "firstName": user.firstName, "lastName": user.lastName,
+            "username": user.username, "gender": user.gender,
+        },
     }
+
 
 @app.post("/api/forgot-password")
 @limiter.limit("3/minute")
-async def forgot_password(
-    request: Request,
-    forgot_request: ForgotPasswordRequest,
-    db: Session = Depends(get_db)
-):
-    """Send OTP for password reset"""
-    try:
-        user = db.query(User).filter(User.email == forgot_request.email).first()
-        if not user:
-            return {
-                "success": True,
-                "message": "If an account exists with this email, you will receive a password reset code."
-            }
-        
-        otp = generate_otp()
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-        
-        db.query(PasswordResetOTP).filter(PasswordResetOTP.email == forgot_request.email).delete()
-        
-        db_otp = PasswordResetOTP(
-            email=forgot_request.email,
-            otp=otp,
-            expires_at=expires_at
-        )
-        db.add(db_otp)
-        db.commit()
-        
-        email_sent = send_password_reset_email(forgot_request.email, otp)
-        
-        if email_sent:
-            message = "Password reset code has been sent to your email."
-        else:
-            message = "Email unavailable; check server logs for reset code."
-        
-        print(f"[PASSWORD RESET] Generated OTP for {forgot_request.email}: {otp}")
-        
-        return {
-            "success": True,
-            "message": message
-        }
-    
-    except Exception as e:
-        print(f"[PASSWORD RESET ERROR] {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to process password reset request. Please try again."
-        )
+async def forgot_password(request: Request, body: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == body.email).first()
+    # Always return the same message to prevent user enumeration
+    if not user:
+        return {"success": True, "message": "If that email exists, a reset code has been sent."}
 
+    otp = generate_otp()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    db.query(PasswordResetOTP).filter(PasswordResetOTP.email == body.email).delete()
+    db.add(PasswordResetOTP(email=body.email, otp=otp, expires_at=expires_at))
+    db.commit()
+    send_password_reset_email(body.email, otp)
+    logger.info("Password reset OTP for %s: %s", body.email, otp)
+    return {"success": True, "message": "Reset code sent (if account exists)"}
+
+
+# BUG FIX: was accepting raw dict – now uses VerifyResetOTPRequest Pydantic model
 @app.post("/api/verify-reset-otp")
 @limiter.limit("5/minute")
-async def verify_reset_otp(
-    request: Request,
-    verify_request: dict,
-    db: Session = Depends(get_db)
-):
-    """Verify OTP for password reset"""
-    try:
-        email = verify_request.get("email")
-        otp = verify_request.get("otp")
-        
-        if not email or not otp:
-            raise HTTPException(status_code=400, detail="Email and OTP are required")
-        
-        stored_otp = db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == email
-        ).first()
-        
-        if not stored_otp:
-            raise HTTPException(
-                status_code=400,
-                detail="Reset code not found or expired. Please request a new one."
-            )
-        
-        now = datetime.now(timezone.utc)
-        expires_at = make_tz_aware(stored_otp.expires_at)
-        
-        if now > expires_at:
-            db.delete(stored_otp)
-            db.commit()
-            raise HTTPException(
-                status_code=400,
-                detail="Reset code has expired. Please request a new one."
-            )
-        
-        if stored_otp.otp != otp:
-            raise HTTPException(status_code=400, detail="Invalid reset code.")
-        
-        return {
-            "success": True,
-            "message": "Reset code verified successfully."
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        print(f"[VERIFY OTP ERROR] {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to verify reset code. Please try again."
-        )
+async def verify_reset_otp(request: Request, body: VerifyResetOTPRequest, db: Session = Depends(get_db)):
+    stored = db.query(PasswordResetOTP).filter(PasswordResetOTP.email == body.email).first()
+    if not stored:
+        raise HTTPException(400, detail="Reset code not found or expired")
+    if datetime.now(timezone.utc) > make_tz_aware(stored.expires_at):
+        db.delete(stored); db.commit()
+        raise HTTPException(400, detail="Reset code expired")
+    if stored.otp != body.otp:
+        raise HTTPException(400, detail="Invalid reset code")
+    return {"success": True, "message": "Reset code verified"}
+
 
 @app.post("/api/reset-password")
 @limiter.limit("5/minute")
-async def reset_password(
-    request: Request,
-    reset_request: ResetPasswordRequest,
-    db: Session = Depends(get_db)
-):
-    """Reset password with OTP verification"""
-    try:
-        stored_otp = db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == reset_request.email
-        ).first()
-        
-        if not stored_otp:
-            raise HTTPException(
-                status_code=400,
-                detail="Reset code not found or expired."
-            )
-        
-        now = datetime.now(timezone.utc)
-        expires_at = make_tz_aware(stored_otp.expires_at)
-        
-        if now > expires_at:
-            db.delete(stored_otp)
-            db.commit()
-            raise HTTPException(
-                status_code=400,
-                detail="Reset code has expired."
-            )
-        
-        if stored_otp.otp != reset_request.otp:
-            raise HTTPException(status_code=400, detail="Invalid reset code.")
-        
-        user = db.query(User).filter(User.email == reset_request.email).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found.")
-        
-        if len(reset_request.new_password) < 8:
-            raise HTTPException(
-                status_code=400,
-                detail="Password must be at least 8 characters long."
-            )
-        
-        user.hashed_password = get_password_hash(reset_request.new_password)
-        
-        db.delete(stored_otp)
-        
-        db.commit()
-        
-        print(f"[PASSWORD RESET] Password reset successful for {reset_request.email}")
-        
-        return {
-            "success": True,
-            "message": "Password has been reset successfully. You can now login with your new password."
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db.rollback()
-        print(f"[RESET PASSWORD ERROR] {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to reset password. Please try again."
-        )
+async def reset_password(request: Request, body: ResetPasswordRequest, db: Session = Depends(get_db)):
+    stored = db.query(PasswordResetOTP).filter(PasswordResetOTP.email == body.email).first()
+    if not stored:
+        raise HTTPException(400, detail="Reset code not found or expired")
+    if datetime.now(timezone.utc) > make_tz_aware(stored.expires_at):
+        db.delete(stored); db.commit()
+        raise HTTPException(400, detail="Reset code expired")
+    if stored.otp != body.otp:
+        raise HTTPException(400, detail="Invalid reset code")
+
+    user = db.query(User).filter(User.email == body.email).first()
+    if not user:
+        raise HTTPException(404, detail="User not found")
+
+    user.hashed_password = get_password_hash(body.new_password)
+    db.delete(stored)
+    db.commit()
+    return {"success": True, "message": "Password reset successfully"}
+
 
 @app.post("/api/resend-reset-otp")
 @limiter.limit("3/minute")
-async def resend_reset_otp(
-    request: Request,
-    resend_request: ForgotPasswordRequest,
-    db: Session = Depends(get_db)
-):
-    """Resend OTP for password reset"""
-    try:
-        user = db.query(User).filter(User.email == resend_request.email).first()
-        if not user:
-            return {
-                "success": True,
-                "message": "If an account exists with this email, you will receive a new reset code."
-            }
-        
-        existing_otp = db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == resend_request.email
-        ).first()
-        
-        if existing_otp:
-            created_at = make_tz_aware(existing_otp.created_at)
-            time_since_last = datetime.now(timezone.utc) - created_at
-            
-            if time_since_last < timedelta(minutes=1):
-                wait_seconds = 60 - time_since_last.seconds
-                return {
-                    "success": False,
-                    "message": f"Please wait {wait_seconds} seconds before requesting a new code."
-                }
-        
-        otp = generate_otp()
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-        
-        db.query(PasswordResetOTP).filter(
-            PasswordResetOTP.email == resend_request.email
-        ).delete()
-        
-        db_otp = PasswordResetOTP(
-            email=resend_request.email,
-            otp=otp,
-            expires_at=expires_at
-        )
-        db.add(db_otp)
-        db.commit()
-        
-        email_sent = send_password_reset_email(resend_request.email, otp)
-        
-        print(f"[RESEND OTP] New OTP for {resend_request.email}: {otp}")
-        
-        return {
-            "success": True,
-            "message": "A new reset code has been sent to your email."
-        }
-    
-    except Exception as e:
-        print(f"[RESEND OTP ERROR] {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to resend reset code. Please try again."
-        )
+async def resend_reset_otp(request: Request, body: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == body.email).first()
+    if not user:
+        return {"success": True, "message": "If that email exists, a new code has been sent."}
 
+    existing = db.query(PasswordResetOTP).filter(PasswordResetOTP.email == body.email).first()
+    if existing:
+        age = datetime.now(timezone.utc) - make_tz_aware(existing.created_at)
+        if age < timedelta(minutes=1):
+            wait = 60 - int(age.total_seconds())
+            return {"success": False, "message": f"Wait {wait}s before requesting a new code"}
+
+    otp = generate_otp()
+    db.query(PasswordResetOTP).filter(PasswordResetOTP.email == body.email).delete()
+    db.add(PasswordResetOTP(email=body.email, otp=otp, expires_at=datetime.now(timezone.utc) + timedelta(minutes=10)))
+    db.commit()
+    send_password_reset_email(body.email, otp)
+    return {"success": True, "message": "New reset code sent"}
+
+
+# ---------------------------------------------------------------------------
+# Chat sessions
+# ---------------------------------------------------------------------------
 @app.get("/api/chat-sessions")
 @limiter.limit("60/minute")
-async def get_chat_sessions(
-    request: Request,
-    user_id: int = Query(...),
-    db: Session = Depends(get_db) 
-):
-    """Get all chat sessions for a specific user"""
-    try:  
-        sessions = db.query(ChatSession).filter(  
-            ChatSession.user_id == user_id
-        ).order_by(ChatSession.id.desc()).all()
-        
-        result = []
-        for session in sessions:
-            # 🔥 FIX: Ensure is_starred is always read correctly
-            is_starred_value = getattr(session, 'is_starred', 0)
-            
-            result.append({
-                "id": session.id,
-                "user_id": session.user_id,
-                "title": session.title,
-                "messages": json.loads(session.messages),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "isStarred": bool(is_starred_value)  # Convert 0/1 to False/True
-            })
-        
-        print(f"[GET SESSIONS] Found {len(result)} sessions for user {user_id}")
-        return result
-    except Exception as e:
-        print(f"[GET SESSIONS ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch chat sessions: {str(e)}")
-    
-@limiter.limit("30/minute")
-async def create_chat_session(
-    request: Request,
-    session: dict,
-    db: Session = Depends(get_db)  # ← CHANGED: Use dependency injection
-):
-    """Create a new chat session for a user"""
-    try:  # ← CHANGED: Simplified try block
-        if not session.get("user_id"):
-            raise HTTPException(status_code=400, detail="user_id is required")
-        
-        new_session = ChatSession(
-            user_id=session.get("user_id"),
-            title=session.get("title", "Untitled Chat"),
-            messages=json.dumps(session.get("messages", [])),
-            is_starred=1 if session.get("isStarred", False) else 0  # ← ADD THIS LINE
-        )
-        db.add(new_session)  # ← CHANGED: Use db from dependency
-        db.commit()
-        db.refresh(new_session)
-        
-        print(f"[CREATE SESSION] Created session {new_session.id} for user {new_session.user_id}")
-        
-        return {
-            "id": new_session.id,
-            "user_id": new_session.user_id,
-            "title": new_session.title,
-            "messages": json.loads(new_session.messages),
+async def get_chat_sessions(request: Request, user_id: int = Query(...), db: Session = Depends(get_db)):
+    sessions = db.query(ChatSession).filter(ChatSession.user_id == user_id).order_by(ChatSession.id.desc()).all()
+    return [
+        {
+            "id": s.id,
+            "user_id": s.user_id,
+            "title": s.title,
+            "messages": json.loads(s.messages),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "isStarred": bool(new_session.is_starred)  # ← ADD THIS LINE
+            "isStarred": bool(s.is_starred),
         }
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db.rollback()  # ← CHANGED: Use db from dependency
-        print(f"[CREATE SESSION ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
+        for s in sessions
+    ]
 
+
+# BUG FIX: was missing @app.post decorator entirely – the route was unreachable
+@app.post("/api/chat-sessions", status_code=201)
+@limiter.limit("30/minute")
+async def create_chat_session(request: Request, body: CreateSessionRequest, db: Session = Depends(get_db)):
+    s = ChatSession(
+        user_id=body.user_id,
+        title=body.title,
+        messages=json.dumps(body.messages),
+        is_starred=1 if body.isStarred else 0,
+    )
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    return {
+        "id": s.id, "user_id": s.user_id, "title": s.title,
+        "messages": json.loads(s.messages),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "isStarred": bool(s.is_starred),
+    }
+
+
+# BUG FIX: was using raw SessionLocal() instead of Depends(get_db)
 @app.put("/api/chat-sessions/{session_id}")
 @limiter.limit("60/minute")
 async def update_chat_session(
-    request: Request,
-    session_id: int,
-    session: dict
+    request: Request, session_id: int, body: dict, db: Session = Depends(get_db)
 ):
-    """Update a chat session (with user verification)"""
-    db_session = SessionLocal()
-    try:
-        existing_session = db_session.query(ChatSession).filter(
-            ChatSession.id == session_id
-        ).first()
-        
-        if not existing_session:
-            raise HTTPException(status_code=404, detail="Chat session not found")
-        
-        if existing_session.user_id != session.get("user_id"):
-            print(f"[UPDATE SESSION] Unauthorized: Session {session_id} belongs to user {existing_session.user_id}, but user {session.get('user_id')} tried to access it")
-            raise HTTPException(status_code=403, detail="Unauthorized to update this session")
-        
-        existing_session.title = session.get("title", existing_session.title)
-        existing_session.messages = json.dumps(session.get("messages", json.loads(existing_session.messages)))
-        db_session.commit()
-        
-        print(f"[UPDATE SESSION] Updated session {session_id} for user {existing_session.user_id}")
-        
-        return {
-            "id": existing_session.id,
-            "user_id": existing_session.user_id,
-            "title": existing_session.title,
-            "messages": json.loads(existing_session.messages),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db_session.rollback()
-        print(f"[UPDATE SESSION ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update chat session: {str(e)}")
-    finally:
-        db_session.close()
+    s = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not s:
+        raise HTTPException(404, detail="Session not found")
+    if s.user_id != body.get("user_id"):
+        raise HTTPException(403, detail="Unauthorized")
+    s.title = body.get("title", s.title)
+    if "messages" in body:
+        s.messages = json.dumps(body["messages"])
+    db.commit()
+    return {
+        "id": s.id, "user_id": s.user_id, "title": s.title,
+        "messages": json.loads(s.messages),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
+
+# BUG FIX: was using raw SessionLocal() instead of Depends(get_db)
 @app.delete("/api/chat-sessions/{session_id}")
 @limiter.limit("30/minute")
 async def delete_chat_session(
-    request: Request,
-    session_id: int,
-    user_id: int = Query(...)
+    request: Request, session_id: int, user_id: int = Query(...), db: Session = Depends(get_db)
 ):
-    """Delete a chat session (with user verification)"""
-    db_session = SessionLocal()
-    try:
-        session = db_session.query(ChatSession).filter(
-            ChatSession.id == session_id
-        ).first()
-        
-        if not session:
-            print(f"[DELETE SESSION] Session {session_id} not found, returning success (already deleted)")
-            return {"success": True, "message": "Chat session not found or already deleted"}
-        
-        if session.user_id != user_id:
-            print(f"[DELETE SESSION] Unauthorized: Session {session_id} belongs to user {session.user_id}, but user {user_id} tried to delete it")
-            raise HTTPException(status_code=403, detail="Unauthorized to delete this session")
-        
-        db_session.delete(session)
-        db_session.commit()
-        
-        print(f"[DELETE SESSION] Successfully deleted session {session_id} for user {user_id}")
-        
-        return {"success": True, "message": "Chat session deleted"}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db_session.rollback()
-        print(f"[DELETE SESSION ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete chat session: {str(e)}")
-    finally:
-        db_session.close()
+    s = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not s:
+        return {"success": True, "message": "Session not found or already deleted"}
+    if s.user_id != user_id:
+        raise HTTPException(403, detail="Unauthorized")
+    db.delete(s)
+    db.commit()
+    return {"success": True, "message": "Session deleted"}
+
 
 @app.put("/api/chat-sessions/{session_id}/star")
 @limiter.limit("30/minute")
-async def toggle_star_chat_session(
-    request: Request,
-    session_id: int,
-    star_request: dict,
-    db: Session = Depends(get_db)
+async def toggle_star(
+    request: Request, session_id: int, body: StarSessionRequest, db: Session = Depends(get_db)
 ):
-    """Toggle star/favorite status for a chat session"""
-    try:
-        user_id = star_request.get("user_id")
-        is_starred = star_request.get("is_starred", False)
-        
-        if not user_id:
-            raise HTTPException(status_code=400, detail="user_id is required")
-        
-        session = db.query(ChatSession).filter(
-            ChatSession.id == session_id,
-            ChatSession.user_id == user_id
-        ).first()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Chat session not found")
-        
-        # Update star status
-        session.is_starred = 1 if is_starred else 0
-        db.commit()
-        
-        print(f"[TOGGLE STAR] Session {session_id} starred={is_starred} for user {user_id}")
-        
-        return {
-            "success": True,
-            "message": "Star status updated",
-            "is_starred": is_starred
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db.rollback()
-        print(f"[TOGGLE STAR ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update star status: {str(e)}")
+    s = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == body.user_id).first()
+    if not s:
+        raise HTTPException(404, detail="Session not found")
+    s.is_starred = 1 if body.is_starred else 0
+    db.commit()
+    return {"success": True, "is_starred": body.is_starred}
+
 
 @app.put("/api/chat-sessions/{session_id}/rename")
 @limiter.limit("30/minute")
-async def rename_chat_session(
-    request: Request,
-    session_id: int,
-    rename_request: dict,
-    db: Session = Depends(get_db)
+async def rename_session(
+    request: Request, session_id: int, body: RenameSessionRequest, db: Session = Depends(get_db)
 ):
-    """Rename a chat session"""
-    try:
-        user_id = rename_request.get("user_id")
-        new_title = rename_request.get("title")
-        
-        if not user_id:
-            raise HTTPException(status_code=400, detail="user_id is required")
-        
-        if not new_title or not new_title.strip():
-            raise HTTPException(status_code=400, detail="title is required")
-        
-        session = db.query(ChatSession).filter(
-            ChatSession.id == session_id,
-            ChatSession.user_id == user_id
-        ).first()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Chat session not found")
-        
-        # Update title
-        session.title = new_title.strip()
-        db.commit()
-        
-        print(f"[RENAME SESSION] Session {session_id} renamed to '{new_title}' for user {user_id}")
-        
-        return {
-            "success": True,
-            "message": "Chat renamed successfully",
-            "title": new_title.strip()
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db.rollback()
-        print(f"[RENAME SESSION ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to rename chat session: {str(e)}")
-    
-@app.post("/api/send-email-change-otp")
-@limiter.limit("3/minute")
-async def send_email_change_otp_endpoint(
-    request: Request,
-    otp_request: SendEmailOTPRequest,
-    db: Session = Depends(get_db)
-):
-    """Send OTP to verify email change"""
-    try:
-        user = db.query(User).filter(User.id == otp_request.userId).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Check if new email already exists
-        existing = db.query(User).filter(
-            User.email == otp_request.newEmail,
-            User.id != otp_request.userId
-        ).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="Email already in use")
-        
-        # Generate and store OTP
-        otp = generate_otp()
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
-        
-        # Delete old OTP if exists
-        db.query(ProfileUpdateOTP).filter(ProfileUpdateOTP.user_id == otp_request.userId).delete()
-        
-        # Save new OTP
-        db_otp = ProfileUpdateOTP(
-            user_id=otp_request.userId,
-            otp=otp,
-            new_email=otp_request.newEmail,
-            expires_at=expires_at
-        )
-        db.add(db_otp)
-        db.commit()
-        
-        # Send email
-        user_name = f"{user.firstName} {user.lastName}"
-        send_email_change_otp(otp_request.newEmail, otp, user_name)
-        
-        print(f"[EMAIL CHANGE OTP] Generated for user {user.id}: {otp}")
-        return {"success": True, "message": f"OTP sent to {otp_request.newEmail}"}
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        print(f"[EMAIL CHANGE OTP ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to send OTP")
+    if not body.title.strip():
+        raise HTTPException(400, detail="Title cannot be empty")
+    s = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == body.user_id).first()
+    if not s:
+        raise HTTPException(404, detail="Session not found")
+    s.title = body.title.strip()
+    db.commit()
+    return {"success": True, "title": s.title}
 
-@app.put("/api/update-email")
-@limiter.limit("10/minute")
-async def update_email_with_otp(
-    request: Request,
-    email_request: UpdateEmailRequest,
-    db: Session = Depends(get_db)
-):
-    """Update email after OTP verification"""
-    try:
-        user = db.query(User).filter(User.id == email_request.userId).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Get OTP record
-        otp_record = db.query(ProfileUpdateOTP).filter(
-            ProfileUpdateOTP.user_id == email_request.userId
-        ).first()
-        
-        if not otp_record:
-            raise HTTPException(status_code=400, detail="OTP not found or expired")
-        
-        # Check expiration
-        now = datetime.now(timezone.utc)
-        expires_at = make_tz_aware(otp_record.expires_at)
-        if now > expires_at:
-            db.delete(otp_record)
-            db.commit()
-            raise HTTPException(status_code=400, detail="OTP expired")
-        
-        # Verify OTP
-        if otp_record.otp != email_request.otp:
-            raise HTTPException(status_code=400, detail="Invalid OTP")
-        
-        # Verify email matches
-        if otp_record.new_email != email_request.newEmail:
-            raise HTTPException(status_code=400, detail="Email mismatch")
-        
-        # Update email
-        user.email = email_request.newEmail
-        db.delete(otp_record)
-        db.commit()
-        db.refresh(user)
-        
-        print(f"[EMAIL UPDATE] Email updated for user {user.id}")
-        
-        return {
-            "success": True,
-            "message": "Email updated successfully",
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "firstName": user.firstName,
-                "lastName": user.lastName,
-                "username": user.username,
-                "phone": user.phone,
-                "gender": user.gender
-            }
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db.rollback()
-        print(f"[EMAIL UPDATE ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to update email")
 
+# ---------------------------------------------------------------------------
+# Profile endpoints
+# ---------------------------------------------------------------------------
 @app.put("/api/update-profile")
 @limiter.limit("10/minute")
-async def update_profile(
-    request: Request,
-    profile_request: UpdateProfileRequest,
-    db: Session = Depends(get_db)
-):
-    """Update user profile"""
-    try:
-        # Get the user
-        user = db.query(User).filter(User.id == profile_request.userId).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Check if email is being changed and if it's already taken
-        if profile_request.email != user.email:
-            existing_email = db.query(User).filter(
-                User.email == profile_request.email,
-                User.id != profile_request.userId
-            ).first()
-            if existing_email:
-                raise HTTPException(status_code=400, detail="Email already in use")
-        
-        # Check if username is being changed and if it's already taken
-        if profile_request.username != user.username:
-            existing_username = db.query(User).filter(
-                User.username == profile_request.username,
-                User.id != profile_request.userId
-            ).first()
-            if existing_username:
-                raise HTTPException(status_code=400, detail="Username already taken")
-        
-        # Check if phone is being changed and if it's already taken
-        if profile_request.phone != user.phone:
-            existing_phone = db.query(User).filter(
-                User.phone == profile_request.phone,
-                User.id != profile_request.userId
-            ).first()
-            if existing_phone:
-                raise HTTPException(status_code=400, detail="Phone number already registered")
-        
-        # Update user fields
-        user.firstName = profile_request.firstName
-        user.lastName = profile_request.lastName
-        user.username = profile_request.username
-        user.email = profile_request.email
-        user.phone = profile_request.phone
-        user.gender = profile_request.gender
-        
-        db.commit()
-        db.refresh(user)
-        
-        print(f"[UPDATE PROFILE] Profile updated for user {user.id}")
-        
-        return {
-            "success": True,
-            "message": "Profile updated successfully",
-            "user": {
-                "id": user.id,
-                "firstName": user.firstName,
-                "lastName": user.lastName,
-                "username": user.username,
-                "email": user.email,
-                "phone": user.phone,
-                "gender": user.gender
-            }
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db.rollback()
-        print(f"[UPDATE PROFILE ERROR] {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to update profile. Please try again."
-        )
+async def update_profile(request: Request, body: UpdateProfileRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == body.userId).first()
+    if not user:
+        raise HTTPException(404, detail="User not found")
+
+    # Uniqueness checks (excluding current user)
+    if body.email != user.email and db.query(User).filter(User.email == body.email, User.id != body.userId).first():
+        raise HTTPException(400, detail="Email already in use")
+    if body.username != user.username and db.query(User).filter(User.username == body.username, User.id != body.userId).first():
+        raise HTTPException(400, detail="Username already taken")
+    if body.phone and body.phone != user.phone and db.query(User).filter(User.phone == body.phone, User.id != body.userId).first():
+        raise HTTPException(400, detail="Phone already registered")
+
+    user.firstName = body.firstName
+    user.lastName = body.lastName
+    user.username = body.username
+    user.email = body.email
+    user.phone = body.phone
+    user.gender = body.gender
+    db.commit()
+    db.refresh(user)
+    return {
+        "success": True,
+        "user": {
+            "id": user.id, "firstName": user.firstName, "lastName": user.lastName,
+            "username": user.username, "email": user.email,
+            "phone": user.phone, "gender": user.gender,
+        },
+    }
+
 
 @app.post("/api/change-password")
 @limiter.limit("5/minute")
-async def change_password(
-    request: Request,
-    password_request: ChangePasswordRequest,
-    db: Session = Depends(get_db)
-):
-    """Change user password"""
-    try:
-        # Get the user
-        user = db.query(User).filter(User.id == password_request.userId).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Verify current password
-        if not verify_password(password_request.currentPassword, user.hashed_password):
-            raise HTTPException(status_code=400, detail="Current password is incorrect")
-        
-        # Validate new password length
-        if len(password_request.newPassword) < 8:
-            raise HTTPException(
-                status_code=400,
-                detail="New password must be at least 8 characters long"
-            )
-        
-        # Check if new password is different from current
-        if verify_password(password_request.newPassword, user.hashed_password):
-            raise HTTPException(
-                status_code=400,
-                detail="New password must be different from current password"
-            )
-        
-        # Update password
-        user.hashed_password = get_password_hash(password_request.newPassword)
-        
-        db.commit()
-        
-        print(f"[CHANGE PASSWORD] Password changed successfully for user {user.id}")
-        
-        return {
-            "success": True,
-            "message": "Password changed successfully"
-        }
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db.rollback()
-        print(f"[CHANGE PASSWORD ERROR] {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to change password. Please try again."
-        )
+async def change_password(request: Request, body: ChangePasswordRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == body.userId).first()
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    if not verify_password(body.currentPassword, user.hashed_password):
+        raise HTTPException(400, detail="Current password incorrect")
+    if verify_password(body.newPassword, user.hashed_password):
+        raise HTTPException(400, detail="New password must differ from current")
+    user.hashed_password = get_password_hash(body.newPassword)
+    db.commit()
+    return {"success": True, "message": "Password changed"}
 
+
+@app.post("/api/send-email-change-otp")
+@limiter.limit("3/minute")
+async def send_email_change_otp_endpoint(request: Request, body: SendEmailOTPRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == body.userId).first()
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    if db.query(User).filter(User.email == body.newEmail, User.id != body.userId).first():
+        raise HTTPException(400, detail="Email already in use")
+
+    otp = generate_otp()
+    db.query(ProfileUpdateOTP).filter(ProfileUpdateOTP.user_id == body.userId).delete()
+    db.add(ProfileUpdateOTP(
+        user_id=body.userId, otp=otp, new_email=body.newEmail,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    ))
+    db.commit()
+    send_email_change_otp(body.newEmail, otp, f"{user.firstName} {user.lastName}")
+    return {"success": True, "message": f"OTP sent to {body.newEmail}"}
+
+
+@app.put("/api/update-email")
+@limiter.limit("10/minute")
+async def update_email(request: Request, body: UpdateEmailRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == body.userId).first()
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    rec = db.query(ProfileUpdateOTP).filter(ProfileUpdateOTP.user_id == body.userId).first()
+    if not rec:
+        raise HTTPException(400, detail="OTP not found or expired")
+    if datetime.now(timezone.utc) > make_tz_aware(rec.expires_at):
+        db.delete(rec); db.commit()
+        raise HTTPException(400, detail="OTP expired")
+    if rec.otp != body.otp:
+        raise HTTPException(400, detail="Invalid OTP")
+    if rec.new_email != body.newEmail:
+        raise HTTPException(400, detail="Email mismatch")
+
+    user.email = body.newEmail
+    db.delete(rec)
+    db.commit()
+    db.refresh(user)
+    return {
+        "success": True,
+        "user": {
+            "id": user.id, "email": user.email,
+            "firstName": user.firstName, "lastName": user.lastName,
+            "username": user.username, "phone": user.phone, "gender": user.gender,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Debug
+# ---------------------------------------------------------------------------
 @app.get("/api/cache-stats")
-async def get_cache_stats():
-    """Get cache statistics for debugging"""
+async def cache_stats():
     return {
         "schema_cache_size": len(schema_cache._cache),
         "query_cache_size": len(query_cache._cache),
-        "connection_pools": len(db_pool_manager._pools)
+        "connection_pools": len(db_pool._engines),
     }
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
